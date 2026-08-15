@@ -1,0 +1,33 @@
+docs/
+AGENTS.md
+agents.md
+
+# CMake and build outputs
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+Makefile
+cmake_install.cmake
+CTestTestfile.cmake
+
+# Binaries and objects
+*.o
+*.obj
+*.exe
+*.out
+*.dll
+*.so
+*.dylib
+
+# IDE files
+.vscode/
+.idea/
+*.user
+*.suo
+*.vcxproj.user
+
+# OS clutter
+.DS_Store
+Thumbs.db
