@@ -1,6 +1,8 @@
-docs/
+# Local learning notes and backup docs.
+/docs
+plan.md
+planinstruction.md
 AGENTS.md
-agents.md
 
 # CMake and build outputs
 build/
@@ -31,3 +33,5 @@ CTestTestfile.cmake
 # OS clutter
 .DS_Store
 Thumbs.db
+
+broker
