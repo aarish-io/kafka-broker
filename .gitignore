@@ -23,6 +23,8 @@ CTestTestfile.cmake
 *.so
 *.dylib
 broker
+test_record
+test_topic_log
 
 # Python
 __pycache__/

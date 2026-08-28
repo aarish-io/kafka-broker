@@ -1,4 +1,8 @@
+#include "record.hpp"
+#include "topic_log.hpp"
+
 #include <iostream>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -25,6 +29,54 @@ namespace
 
     // Mutex to protect concurrent access to the shared topics map
     std::mutex topics_mutex;
+
+    void recover_topics_from_disk(const std::string &data_dir = "data")
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(data_dir, ec) || !std::filesystem::is_directory(data_dir, ec))
+        {
+            std::cout << "data directory '" << data_dir << "' does not exist. Starting with empty state.\n";
+            return;
+        }
+
+        std::size_t loaded_topics = 0;
+        std::size_t loaded_messages = 0;
+
+        for (const auto &entry : std::filesystem::directory_iterator(data_dir, ec))
+        {
+            if (ec)
+            {
+                std::cerr << "error iterating data directory: " << ec.message() << '\n';
+                break;
+            }
+
+            if (entry.is_regular_file() && entry.path().extension() == ".log")
+            {
+                std::string topic_name = entry.path().stem().string();
+                if (topic_name.empty())
+                {
+                    continue;
+                }
+
+                kafka::TopicLog log(topic_name, data_dir);
+                std::vector<kafka::Record> records = log.read_all();
+
+                std::vector<std::string> messages;
+                messages.reserve(records.size());
+                for (const auto &rec : records)
+                {
+                    messages.push_back(rec.payload);
+                }
+
+                topics[topic_name] = std::move(messages);
+                loaded_topics++;
+                loaded_messages += records.size();
+            }
+        }
+
+        std::cout << "recovered " << loaded_topics << " topic(s) with "
+                  << loaded_messages << " message(s) from disk.\n";
+    }
 
     enum class RequestType
     {
@@ -260,57 +312,72 @@ namespace
 
                 switch (parsed.type)
                 {
-                    case RequestType::PING:
-                        response = "PONG";
-                        break;
+                case RequestType::PING:
+                    response = "PONG";
+                    break;
 
-                    case RequestType::PRODUCE:
+                case RequestType::PRODUCE:
+                {
+                    try
+                    {
+                        // 1. Append record to persistent topic log file outside topics_mutex lock
+                        kafka::TopicLog log(parsed.topic);
+                        log.append(kafka::Record{parsed.payload});
+
+                        // 2. Update in-memory state only after disk append succeeds
                         {
-                            // Using operator[] intentionally creates the topic on first PRODUCE
                             std::lock_guard<std::mutex> lock(topics_mutex);
                             topics[parsed.topic].push_back(parsed.payload);
                         }
+
                         response = "OK";
-                        break;
+                    }
+                    catch (const std::exception &ex)
+                    {
+                        std::cerr << "PRODUCE log append failed: " << ex.what() << '\n';
+                        response = "ERROR";
+                    }
+                }
+                break;
 
-                    case RequestType::FETCH:
+                case RequestType::FETCH:
+                {
+                    // Look up topic using find to avoid auto-creating topic on FETCH
+                    std::lock_guard<std::mutex> lock(topics_mutex);
+                    auto it = topics.find(parsed.topic);
+
+                    if (it == topics.end())
+                    {
+                        response = "ERROR";
+                    }
+                    else
+                    {
+                        std::vector<std::string> messages = it->second;
+
+                        if (messages.empty())
                         {
-                            // Look up topic using find to avoid auto-creating topic on FETCH
-                            std::lock_guard<std::mutex> lock(topics_mutex);
-                            auto it = topics.find(parsed.topic);
-
-                            if (it == topics.end())
+                            response = "";
+                        }
+                        else
+                        {
+                            response = "";
+                            for (size_t i = 0; i < messages.size(); ++i)
                             {
-                                response = "ERROR";
-                            }
-                            else
-                            {
-                                std::vector<std::string> messages = it->second;
-
-                                if (messages.empty())
+                                response += messages[i];
+                                if (i < messages.size() - 1)
                                 {
-                                    response = "";
-                                }
-                                else
-                                {
-                                    response = "";
-                                    for (size_t i = 0; i < messages.size(); ++i)
-                                    {
-                                        response += messages[i];
-                                        if (i < messages.size() - 1)
-                                        {
-                                            response += '\n';
-                                        }
-                                    }
+                                    response += '\n';
                                 }
                             }
                         }
-                        break;
+                    }
+                }
+                break;
 
-                    case RequestType::INVALID:
-                    default:
-                        response = "ERROR";
-                        break;
+                case RequestType::INVALID:
+                default:
+                    response = "ERROR";
+                    break;
                 }
 
                 write_frame(client_fd, response);
@@ -332,6 +399,8 @@ int main()
 {
     try
     {
+        recover_topics_from_disk();
+
         int server_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (server_fd < 0)
         {
