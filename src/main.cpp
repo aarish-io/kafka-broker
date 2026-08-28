@@ -3,7 +3,10 @@
 #include <string>
 #include <thread>
 #include <cstdint>
-
+#include <sstream>
+#include <unordered_map>
+#include <vector>
+#include <mutex>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -18,6 +21,101 @@ namespace
     constexpr int kBacklog = 8;
     constexpr std::uint32_t kMaxPayloadSize = 64 * 1024;
 
+    std::unordered_map<std::string, std::vector<std::string>> topics;
+
+    // Mutex to protect concurrent access to the shared topics map
+    std::mutex topics_mutex;
+
+    enum class RequestType
+    {
+        PING,
+        PRODUCE,
+        FETCH,
+        INVALID
+    };
+
+    struct Request
+    {
+        RequestType type = RequestType::INVALID;
+        std::string topic;
+        std::string payload;
+    };
+
+    Request parse_request(const std::string &raw_request)
+    {
+        Request request;
+
+        std::istringstream stream(raw_request);
+        std::string command;
+
+        if (!(stream >> command))
+        {
+            request.type = RequestType::INVALID;
+            return request;
+        }
+
+        if (command == "PING")
+        {
+            request.type = RequestType::PING;
+        }
+        else if (command == "FETCH")
+        {
+            std::string topic;
+            if (!(stream >> topic))
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+            if (topic.empty())
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+            request.type = RequestType::FETCH;
+            request.topic = topic;
+        }
+        else if (command == "PRODUCE")
+        {
+            std::string topic;
+            if (!(stream >> topic))
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+            if (topic.empty())
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            // The rest of the stream is the payload (can contain spaces)
+            std::string payload;
+            std::getline(stream, payload);
+
+            // Remove leading space from space separator between topic and payload
+            if (!payload.empty() && payload[0] == ' ')
+            {
+                payload.erase(0, 1);
+            }
+
+            if (payload.empty())
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            request.type = RequestType::PRODUCE;
+            request.topic = topic;
+            request.payload = payload;
+        }
+        else
+        {
+            request.type = RequestType::INVALID;
+        }
+
+        return request;
+    }
+
     std::string socket_error()
     {
         return std::strerror(errno);
@@ -29,7 +127,6 @@ namespace
 
         while (total_read < bytes)
         {
-            // 1.4.1 Read until the requested number of bytes arrives.
             ssize_t bytes_read =
                 recv(fd, buffer + total_read, bytes - total_read, 0);
 
@@ -60,7 +157,6 @@ namespace
 
         while (total_sent < bytes)
         {
-            // 1.4.2 Send until the complete buffer has been transmitted.
             ssize_t bytes_sent =
                 send(fd, buffer + total_sent, bytes - total_sent, MSG_NOSIGNAL);
 
@@ -87,7 +183,6 @@ namespace
     {
         char header[sizeof(std::uint32_t)];
 
-        // 1.4.3 Read the fixed-size 4-byte frame header.
         if (!read_exactly(fd, header, sizeof(header)))
         {
             return false;
@@ -110,7 +205,6 @@ namespace
             return true;
         }
 
-        // 1.4.4 Read exactly the payload bytes described by the header.
         if (!read_exactly(fd, payload.data(), payload_size))
         {
             return false;
@@ -126,7 +220,6 @@ namespace
             throw std::runtime_error("response payload is too large");
         }
 
-        // 1.4.5 Encode the payload size as a 4-byte network-order integer.
         std::uint32_t payload_size =
             static_cast<std::uint32_t>(payload.size());
 
@@ -142,7 +235,6 @@ namespace
             return;
         }
 
-        // 1.4.6 Send the complete payload after its length header.
         write_exactly(fd, payload.data(), payload.size());
     }
 
@@ -150,41 +242,87 @@ namespace
     {
         try
         {
-            std::string request;
-
-            // 1.4.7 Read one complete framed request.
-            if (!read_frame(client_fd, request))
+            while (true)
             {
-                std::cout << "client disconnected before sending a complete request\n";
-                close(client_fd);
-                return;
+                std::string request;
+
+                if (!read_frame(client_fd, request))
+                {
+                    std::cout << "client disconnected\n";
+                    break;
+                }
+
+                std::cout << "received: " << request << '\n';
+
+                std::string response;
+
+                Request parsed = parse_request(request);
+
+                switch (parsed.type)
+                {
+                    case RequestType::PING:
+                        response = "PONG";
+                        break;
+
+                    case RequestType::PRODUCE:
+                        {
+                            // Using operator[] intentionally creates the topic on first PRODUCE
+                            std::lock_guard<std::mutex> lock(topics_mutex);
+                            topics[parsed.topic].push_back(parsed.payload);
+                        }
+                        response = "OK";
+                        break;
+
+                    case RequestType::FETCH:
+                        {
+                            // Look up topic using find to avoid auto-creating topic on FETCH
+                            std::lock_guard<std::mutex> lock(topics_mutex);
+                            auto it = topics.find(parsed.topic);
+
+                            if (it == topics.end())
+                            {
+                                response = "ERROR";
+                            }
+                            else
+                            {
+                                std::vector<std::string> messages = it->second;
+
+                                if (messages.empty())
+                                {
+                                    response = "";
+                                }
+                                else
+                                {
+                                    response = "";
+                                    for (size_t i = 0; i < messages.size(); ++i)
+                                    {
+                                        response += messages[i];
+                                        if (i < messages.size() - 1)
+                                        {
+                                            response += '\n';
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        break;
+
+                    case RequestType::INVALID:
+                    default:
+                        response = "ERROR";
+                        break;
+                }
+
+                write_frame(client_fd, response);
+
+                std::cout << "sent: " << response << '\n';
             }
-
-            std::cout << "received: " << request << '\n';
-
-            // 1.4.8 The protocol from 1.2 stays unchanged: PING -> PONG, otherwise ERROR.
-            std::string response;
-
-            if (request == "PING")
-            {
-                response = "PONG";
-            }
-            else
-            {
-                response = "ERROR";
-            }
-
-            // 1.4.9 Send the response as a complete framed message.
-            write_frame(client_fd, response);
-
-            std::cout << "sent: " << response << '\n';
         }
         catch (const std::exception &error)
         {
             std::cerr << "client handling failed: " << error.what() << '\n';
         }
 
-        // 1.4.10 Close this client's connection after one request/response.
         close(client_fd);
     }
 
@@ -194,7 +332,6 @@ int main()
 {
     try
     {
-        // 1.1.1 Create the listening socket: this is the server's door.
         int server_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (server_fd < 0)
         {
@@ -205,7 +342,6 @@ int main()
         setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR,
                    reinterpret_cast<const char *>(&reuse_address), sizeof(reuse_address));
 
-        // 1.1.2 Bind gives the server socket a local address: 0.0.0.0:9092.
         sockaddr_in server_address{};
         server_address.sin_family = AF_INET;
         server_address.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -218,7 +354,6 @@ int main()
             throw std::runtime_error("bind failed: " + socket_error());
         }
 
-        // 1.1.3 Listen changes the socket into a passive socket that waits for clients.
         if (listen(server_fd, kBacklog) < 0)
         {
             close(server_fd);
@@ -228,7 +363,6 @@ int main()
         std::cout << "broker listening on port " << kPort << '\n';
         std::cout << "waiting for clients to connect...\n";
 
-        // 1.3.3 Main now stays in the accept loop instead of handling the client itself.
         while (true)
         {
             sockaddr_in client_address{};
@@ -242,7 +376,6 @@ int main()
                 continue;
             }
 
-            // 1.3.4 detach lets the worker continue while main immediately accepts again.
             std::thread client_thread(handle_client, client_fd);
             client_thread.detach();
         }
