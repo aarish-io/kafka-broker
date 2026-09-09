@@ -8,7 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(kafka-broker
     src/main.cpp
+    src/broker.cpp
+    src/protocol.cpp
+    src/tcp_server.cpp
 )
+
+target_include_directories(kafka-broker PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_executable(test_record
     tests/test_record.cpp

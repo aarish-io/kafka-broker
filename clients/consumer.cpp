@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     // 5.4.1 Validate command-line arguments
     if (argc != 4)
@@ -101,4 +101,3 @@ int main(int argc, char* argv[])
 
     return 0;
 }
-

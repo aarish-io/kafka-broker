@@ -54,7 +54,7 @@ namespace kafka
         return true;
     }
 
-        // Returns partition-specific log path: data/<topic>/partition-<id>.log
+    // Returns partition-specific log path: data/<topic>/partition-<id>.log
     inline std::string get_log_path(const std::string &topic, int partition_id)
     {
         return "data/" + topic + "/partition-" + std::to_string(partition_id) + ".log";

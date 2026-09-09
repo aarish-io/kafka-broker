@@ -1,8 +1,9 @@
 #pragma once
 
+#include "framing.hpp"
+
 #include <arpa/inet.h>
 #include <cerrno>
-#include <cstdint>
 #include <cstring>
 #include <netinet/in.h>
 #include <stdexcept>
@@ -12,11 +13,8 @@
 
 namespace kafka
 {
-    // Maximum allowable request/response payload size (64 KiB), matching broker limits.
-    constexpr std::uint32_t kMaxClientPayloadSize = 64 * 1024;
-
     // BrokerClient provides a minimal TCP networking layer for communicating with the Kafka broker.
-    // It encapsulates socket lifecycle, length-prefixed message framing, and partial read/write handling.
+    // It encapsulates socket lifecycle and uses the shared framing module for length-prefixed messaging.
     class BrokerClient
     {
     public:
@@ -54,7 +52,7 @@ namespace kafka
             return *this;
         }
 
-        // 5.1.1 Create socket and connect to the broker
+        // Create socket and connect to the broker
         void connect()
         {
             if (fd_ >= 0)
@@ -80,7 +78,6 @@ namespace kafka
                 throw std::runtime_error("Invalid IP address specified: " + host_);
             }
 
-            // 5.1.2 Connect to the broker
             if (::connect(fd_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0)
             {
                 std::string err = std::strerror(errno);
@@ -90,7 +87,7 @@ namespace kafka
             }
         }
 
-        // 5.1.3 & 5.1.4 Send framed request and receive framed response over the active TCP connection
+        // Send framed request and receive framed response over the active TCP connection
         std::string request(const std::string &req_payload)
         {
             if (fd_ < 0)
@@ -98,10 +95,13 @@ namespace kafka
                 throw std::runtime_error("Client is not connected to broker");
             }
 
-            write_frame(req_payload);
+            write_frame(fd_, req_payload);
 
             std::string resp_payload;
-            read_frame(resp_payload);
+            if (!read_frame(fd_, resp_payload))
+            {
+                throw std::runtime_error("Connection closed by broker");
+            }
             return resp_payload;
         }
 
@@ -120,98 +120,6 @@ namespace kafka
         }
 
     private:
-        bool read_exactly(char *buffer, std::size_t bytes)
-        {
-            std::size_t total_read = 0;
-            while (total_read < bytes)
-            {
-                ssize_t bytes_read = ::recv(fd_, buffer + total_read, bytes - total_read, 0);
-                if (bytes_read < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    throw std::runtime_error("recv failed: " + std::string(std::strerror(errno)));
-                }
-                if (bytes_read == 0)
-                {
-                    return false;
-                }
-                total_read += static_cast<std::size_t>(bytes_read);
-            }
-            return true;
-        }
-
-        void write_exactly(const char *buffer, std::size_t bytes)
-        {
-            std::size_t total_sent = 0;
-            while (total_sent < bytes)
-            {
-                ssize_t bytes_sent = ::send(fd_, buffer + total_sent, bytes - total_sent, MSG_NOSIGNAL);
-                if (bytes_sent < 0)
-                {
-                    if (errno == EINTR)
-                    {
-                        continue;
-                    }
-                    throw std::runtime_error("send failed: " + std::string(std::strerror(errno)));
-                }
-                if (bytes_sent == 0)
-                {
-                    throw std::runtime_error("send returned zero bytes");
-                }
-                total_sent += static_cast<std::size_t>(bytes_sent);
-            }
-        }
-
-        void write_frame(const std::string &payload)
-        {
-            if (payload.size() > kMaxClientPayloadSize)
-            {
-                throw std::runtime_error("Request payload exceeds maximum allowed size");
-            }
-
-            std::uint32_t payload_size = static_cast<std::uint32_t>(payload.size());
-            std::uint32_t network_length = htonl(payload_size);
-
-            write_exactly(reinterpret_cast<const char *>(&network_length), sizeof(network_length));
-
-            if (!payload.empty())
-            {
-                write_exactly(payload.data(), payload.size());
-            }
-        }
-
-        void read_frame(std::string &payload)
-        {
-            char header[sizeof(std::uint32_t)];
-            if (!read_exactly(header, sizeof(header)))
-            {
-                throw std::runtime_error("Connection closed by broker while reading frame header");
-            }
-
-            std::uint32_t network_length = 0;
-            std::memcpy(&network_length, header, sizeof(network_length));
-            std::uint32_t payload_size = ntohl(network_length);
-
-            if (payload_size > kMaxClientPayloadSize)
-            {
-                throw std::runtime_error("Response frame payload exceeds maximum allowed size");
-            }
-
-            payload.resize(payload_size);
-            if (payload_size == 0)
-            {
-                return;
-            }
-
-            if (!read_exactly(payload.data(), payload_size))
-            {
-                throw std::runtime_error("Connection closed by broker while reading frame payload");
-            }
-        }
-
         std::string host_;
         int port_;
         int fd_;

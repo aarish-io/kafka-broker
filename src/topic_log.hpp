@@ -165,7 +165,7 @@ namespace kafka
             return records;
         }
 
-        private:
+    private:
         void ensure_directory_exists() const
         {
             std::error_code ec;

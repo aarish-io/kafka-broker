@@ -2,7 +2,7 @@
 #include <iostream>
 #include <string>
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     // 5.2.1 Validate command-line arguments
     if (argc != 4)

@@ -226,6 +226,8 @@ def run_stage4_tests():
 
 if __name__ == "__main__":
     if not os.path.exists(BROKER_BIN):
-        subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-o", "broker", "src/main.cpp", "-pthread"], check=True)
+        subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-o", "broker", 
+                        "src/main.cpp", "src/broker.cpp", "src/protocol.cpp", "src/tcp_server.cpp", 
+                        "-pthread", "-I", "src"], check=True)
     success = run_stage4_tests()
     sys.exit(0 if success else 1)
