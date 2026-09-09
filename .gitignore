@@ -1,8 +1,8 @@
 # Local learning notes and backup docs.
-docs/
-plan.md
-planinstruction.md
-AGENTS.md
+# docs/
+# plan.md
+# planinstruction.md
+# AGENTS.md
 
 # CMake and build outputs
 build/
@@ -23,6 +23,8 @@ CTestTestfile.cmake
 *.so
 *.dylib
 broker
+producer
+consumer
 test_record
 test_topic_log
 
