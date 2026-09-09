@@ -33,21 +33,25 @@ namespace kafka
         };
     } // namespace detail
 
-    // TopicLog manages appending binary records to a single topic's append-only log file.
     class TopicLog
     {
     public:
-        explicit TopicLog(std::string topic, std::string data_dir = "data")
-            : topic_(std::move(topic)), data_dir_(std::move(data_dir))
+        TopicLog(std::string topic, int partition_id, std::string data_dir = "data")
+            : topic_(std::move(topic)), partition_id_(partition_id), data_dir_(std::move(data_dir))
         {
             if (topic_.empty())
             {
                 throw std::invalid_argument("topic name cannot be empty");
             }
-            log_path_ = data_dir_ + "/" + topic_ + ".log";
+            if (partition_id_ < 0)
+            {
+                throw std::invalid_argument("partition id cannot be negative");
+            }
+            log_path_ = data_dir_ + "/" + topic_ + "/partition-" + std::to_string(partition_id_) + ".log";
         }
 
         const std::string &topic() const { return topic_; }
+        int partition_id() const { return partition_id_; }
         const std::string &log_path() const { return log_path_; }
 
         // Append a single record to the topic's log file using POSIX file APIs with fsync.
@@ -120,7 +124,8 @@ namespace kafka
         }
 
         // Read all complete records from the topic's log file.
-        std::vector<Record> read_all() const
+        // Truncates any incomplete final record trailing at the end of the file.
+        std::vector<Record> read_all()
         {
             std::vector<Record> records;
 
@@ -147,21 +152,32 @@ namespace kafka
                 records.push_back(record);
             }
 
+            // If there are unparsed trailing bytes (incomplete final record), truncate log file at buffer_offset
+            if (buffer_offset < buffer.size())
+            {
+                std::filesystem::resize_file(log_path_, buffer_offset, ec);
+                if (ec)
+                {
+                    throw std::runtime_error("failed to truncate incomplete final record in log file (" + log_path_ + "): " + ec.message());
+                }
+            }
+
             return records;
         }
 
-    private:
+        private:
         void ensure_directory_exists() const
         {
             std::error_code ec;
-            std::filesystem::create_directories(data_dir_, ec);
+            std::filesystem::create_directories(data_dir_ + "/" + topic_, ec);
             if (ec)
             {
-                throw std::runtime_error("failed to create data directory (" + data_dir_ + "): " + ec.message());
+                throw std::runtime_error("failed to create topic directory (" + data_dir_ + "/" + topic_ + "): " + ec.message());
             }
         }
 
         std::string topic_;
+        int partition_id_;
         std::string data_dir_;
         std::string log_path_;
     };

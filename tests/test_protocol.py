@@ -43,16 +43,27 @@ def send_and_receive(sock, message):
 
 
 def test_protocol():
-    """Test various protocol requests."""
+    """Test various protocol requests for Stage 4."""
     tests = [
         # (request, expected_response, description)
         ("PING", "PONG", "PING should return PONG"),
-        ("PRODUCE orders hello", "OK", "PRODUCE with single-word payload"),
-        ("PRODUCE orders hello world", "OK", "PRODUCE with multi-word payload"),
-        ("FETCH orders", "OK", "FETCH with topic"),
-        ("FETCH", "ERROR", "FETCH without topic should be invalid"),
-        ("PRODUCE", "ERROR", "PRODUCE without topic should be invalid"),
-        ("PRODUCE orders", "ERROR", "PRODUCE without payload should be invalid"),
+        ("PRODUCE orders 0 hello", "OK", "PRODUCE partition 0 single-word payload"),
+        ("PRODUCE orders 1 hello world", "OK", "PRODUCE partition 1 multi-word payload"),
+        ("FETCH orders 0 0", "hello", "FETCH partition 0 offset 0"),
+        ("FETCH orders 1 0", "hello world", "FETCH partition 1 offset 0"),
+        ("FETCH", "ERROR", "FETCH without args should be invalid"),
+        ("FETCH orders", "ERROR", "FETCH without partition and offset should be invalid"),
+        ("FETCH orders 0", "ERROR", "FETCH without offset should be invalid"),
+        ("FETCH orders -1 0", "ERROR", "FETCH with negative partition should be invalid"),
+        ("FETCH orders 3 0", "ERROR", "FETCH with out-of-range partition (>=3) should be invalid"),
+        ("FETCH orders 0 -1", "ERROR", "FETCH with negative offset should be invalid"),
+        ("FETCH orders 0 abc", "ERROR", "FETCH with non-numeric offset should be invalid"),
+        ("PRODUCE", "ERROR", "PRODUCE without args should be invalid"),
+        ("PRODUCE orders", "ERROR", "PRODUCE without partition and payload should be invalid"),
+        ("PRODUCE orders 0", "ERROR", "PRODUCE without payload should be invalid"),
+        ("PRODUCE orders -1 hello", "ERROR", "PRODUCE with negative partition should be invalid"),
+        ("PRODUCE orders 3 hello", "ERROR", "PRODUCE with out-of-range partition (>=3) should be invalid"),
+        ("PRODUCE orders abc hello", "ERROR", "PRODUCE with non-numeric partition should be invalid"),
         ("UNKNOWN cmd", "ERROR", "Unknown command should be invalid"),
     ]
     

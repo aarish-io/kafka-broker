@@ -54,10 +54,10 @@ namespace kafka
         return true;
     }
 
-    // Returns standard topic log path: data/<topic>.log
-    inline std::string get_log_path(const std::string &topic)
+        // Returns partition-specific log path: data/<topic>/partition-<id>.log
+    inline std::string get_log_path(const std::string &topic, int partition_id)
     {
-        return "data/" + topic + ".log";
+        return "data/" + topic + "/partition-" + std::to_string(partition_id) + ".log";
     }
 
 } // namespace kafka

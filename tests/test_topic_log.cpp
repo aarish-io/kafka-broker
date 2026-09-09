@@ -12,9 +12,10 @@ void test_topic_log_append_and_readback()
     std::string test_dir = "test_data";
     std::filesystem::remove_all(test_dir);
 
-    kafka::TopicLog log("orders", test_dir);
+    kafka::TopicLog log("orders", 0, test_dir);
     assert(log.topic() == "orders");
-    assert(log.log_path() == "test_data/orders.log");
+    assert(log.partition_id() == 0);
+    assert(log.log_path() == "test_data/orders/partition-0.log");
 
     kafka::Record r1{"order-101"};
     kafka::Record r2{"order-102 payload with spaces"};
@@ -58,25 +59,69 @@ void test_topic_log_append_and_readback()
     std::cout << "[PASS] test_topic_log_append_and_readback\n";
 }
 
-void test_topic_log_empty_topic_throws()
+void test_topic_log_invalid_constructor_args()
 {
     try
     {
-        kafka::TopicLog log("");
-        assert(false && "Should have thrown std::invalid_argument");
+        kafka::TopicLog log("", 0);
+        assert(false && "Should have thrown std::invalid_argument for empty topic");
     }
     catch (const std::invalid_argument &ex)
     {
         // Expected
     }
 
-    std::cout << "[PASS] test_topic_log_empty_topic_throws\n";
+    try
+    {
+        kafka::TopicLog log("orders", -1);
+        assert(false && "Should have thrown std::invalid_argument for negative partition_id");
+    }
+    catch (const std::invalid_argument &ex)
+    {
+        // Expected
+    }
+
+    std::cout << "[PASS] test_topic_log_invalid_constructor_args\n";
+}
+
+void test_topic_log_incomplete_final_record_truncation()
+{
+    std::string test_dir = "test_data_truncation";
+    std::filesystem::remove_all(test_dir);
+
+    kafka::TopicLog log("events", 1, test_dir);
+    assert(log.log_path() == "test_data_truncation/events/partition-1.log");
+
+    log.append(kafka::Record{"event-1"});
+    log.append(kafka::Record{"event-2"});
+
+    std::uintmax_t valid_file_size = std::filesystem::file_size(log.log_path());
+
+    // Corrupt log by appending incomplete trailing bytes (simulating crash mid-write)
+    std::ofstream file(log.log_path(), std::ios::binary | std::ios::app);
+    file.write("PARTIAL", 7);
+    file.close();
+
+    assert(std::filesystem::file_size(log.log_path()) == valid_file_size + 7);
+
+    // read_all() should recover the 2 complete records and truncate the 7 incomplete bytes
+    std::vector<kafka::Record> records = log.read_all();
+    assert(records.size() == 2);
+    assert(records[0].payload == "event-1");
+    assert(records[1].payload == "event-2");
+
+    // Verify topic log file was truncated back to valid_file_size
+    assert(std::filesystem::file_size(log.log_path()) == valid_file_size);
+
+    std::filesystem::remove_all(test_dir);
+    std::cout << "[PASS] test_topic_log_incomplete_final_record_truncation\n";
 }
 
 int main()
 {
     test_topic_log_append_and_readback();
-    test_topic_log_empty_topic_throws();
+    test_topic_log_invalid_constructor_args();
+    test_topic_log_incomplete_final_record_truncation();
 
     std::cout << "All TopicLog tests passed successfully!\n";
     return 0;

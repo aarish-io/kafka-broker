@@ -63,7 +63,7 @@ def stop_broker(proc):
 
 
 def run_verification():
-    print("=== Mini-Stage 3.5 Restart Persistence Verification ===")
+    print("=== Stage 4 Restart Persistence Verification ===")
 
     # Step 1: Clean data directory
     if os.path.exists(DATA_DIR):
@@ -75,15 +75,15 @@ def run_verification():
     try:
         with socket.create_connection((HOST, PORT)) as sock:
             assert send_request(sock, "PING") == "PONG"
-            assert send_request(sock, "PRODUCE topic1 msg1") == "OK"
-            assert send_request(sock, "PRODUCE topic1 msg2 with space") == "OK"
-            assert send_request(sock, "PRODUCE topic2 topic2_first") == "OK"
-            assert send_request(sock, "PRODUCE topic2 topic2_second") == "OK"
+            assert send_request(sock, "PRODUCE topic1 0 msg1") == "OK"
+            assert send_request(sock, "PRODUCE topic1 0 msg2 with space") == "OK"
+            assert send_request(sock, "PRODUCE topic2 1 topic2_first") == "OK"
+            assert send_request(sock, "PRODUCE topic2 1 topic2_second") == "OK"
             
-            res1 = send_request(sock, "FETCH topic1")
+            res1 = send_request(sock, "FETCH topic1 0 0")
             assert res1 == "msg1\nmsg2 with space", f"Expected msg1\\nmsg2 with space, got: {repr(res1)}"
             
-            res2 = send_request(sock, "FETCH topic2")
+            res2 = send_request(sock, "FETCH topic2 1 0")
             assert res2 == "topic2_first\ntopic2_second", f"Expected topic2_first\\ntopic2_second, got: {repr(res2)}"
         print("  -> Phase 1 passed: PRODUCE and FETCH working on fresh broker.")
     finally:
@@ -92,23 +92,23 @@ def run_verification():
     time.sleep(0.2)
 
     # Step 3: Restart broker and verify recovery
-    print("[2/4] Restarting broker with existing topic log files...")
+    print("[2/4] Restarting broker with existing partition log files...")
     broker = start_broker()
     try:
         with socket.create_connection((HOST, PORT)) as sock:
             assert send_request(sock, "PING") == "PONG"
 
-            # Fetch recovered topic1
-            res1 = send_request(sock, "FETCH topic1")
+            # Fetch recovered topic1 partition 0
+            res1 = send_request(sock, "FETCH topic1 0 0")
             assert res1 == "msg1\nmsg2 with space", f"Recovery topic1 failed, got: {repr(res1)}"
 
-            # Fetch recovered topic2 (verify no topic log mixing)
-            res2 = send_request(sock, "FETCH topic2")
+            # Fetch recovered topic2 partition 1 (verify no topic/partition log mixing)
+            res2 = send_request(sock, "FETCH topic2 1 0")
             assert res2 == "topic2_first\ntopic2_second", f"Recovery topic2 failed, got: {repr(res2)}"
 
-            # Produce additional message post-restart
-            assert send_request(sock, "PRODUCE topic1 msg3") == "OK"
-            res1_updated = send_request(sock, "FETCH topic1")
+            # Produce additional message post-restart to topic1 partition 0
+            assert send_request(sock, "PRODUCE topic1 0 msg3") == "OK"
+            res1_updated = send_request(sock, "FETCH topic1 0 0")
             assert res1_updated == "msg1\nmsg2 with space\nmsg3", f"Post-restart produce failed, got: {repr(res1_updated)}"
         print("  -> Phase 2 passed: Recovery verified across broker restart.")
     finally:
@@ -121,7 +121,7 @@ def run_verification():
     broker = start_broker()
     try:
         with socket.create_connection((HOST, PORT)) as sock:
-            res1_final = send_request(sock, "FETCH topic1")
+            res1_final = send_request(sock, "FETCH topic1 0 0")
             assert res1_final == "msg1\nmsg2 with space\nmsg3", f"Second recovery topic1 failed, got: {repr(res1_final)}"
         print("  -> Phase 3 passed: Second restart recovery verified.")
     finally:

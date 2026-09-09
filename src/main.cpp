@@ -24,8 +24,34 @@ namespace
     constexpr int kPort = 9092;
     constexpr int kBacklog = 8;
     constexpr std::uint32_t kMaxPayloadSize = 64 * 1024;
+    constexpr int kDefaultPartitionCount = 3;
 
-    std::unordered_map<std::string, std::vector<std::string>> topics;
+    struct Partition
+    {
+        int id;
+        std::vector<std::string> messages;
+
+        explicit Partition(int partition_id) : id(partition_id) {}
+    };
+
+    struct Topic
+    {
+        std::string name;
+        std::vector<Partition> partitions;
+
+        Topic() = default;
+
+        explicit Topic(const std::string &topic_name) : name(topic_name)
+        {
+            partitions.reserve(kDefaultPartitionCount);
+            for (int i = 0; i < kDefaultPartitionCount; ++i)
+            {
+                partitions.emplace_back(i);
+            }
+        }
+    };
+
+    std::unordered_map<std::string, Topic> topics;
 
     // Mutex to protect concurrent access to the shared topics map
     std::mutex topics_mutex;
@@ -42,7 +68,8 @@ namespace
         std::size_t loaded_topics = 0;
         std::size_t loaded_messages = 0;
 
-        for (const auto &entry : std::filesystem::directory_iterator(data_dir, ec))
+        // Iterate over topic directories (data/<topic>/)
+        for (const auto &topic_entry : std::filesystem::directory_iterator(data_dir, ec))
         {
             if (ec)
             {
@@ -50,27 +77,62 @@ namespace
                 break;
             }
 
-            if (entry.is_regular_file() && entry.path().extension() == ".log")
+            if (!topic_entry.is_directory())
             {
-                std::string topic_name = entry.path().stem().string();
-                if (topic_name.empty())
+                continue;
+            }
+
+            std::string topic_name = topic_entry.path().filename().string();
+            if (topic_name.empty())
+            {
+                continue;
+            }
+
+            Topic topic(topic_name);
+            bool found_any_partition = false;
+
+            // Iterate over partition log files within each topic directory
+            for (const auto &partition_entry : std::filesystem::directory_iterator(topic_entry.path(), ec))
+            {
+                if (ec)
+                {
+                    std::cerr << "error iterating topic directory: " << ec.message() << '\n';
+                    break;
+                }
+
+                if (!partition_entry.is_regular_file() || partition_entry.path().extension() != ".log")
                 {
                     continue;
                 }
 
-                kafka::TopicLog log(topic_name, data_dir);
-                std::vector<kafka::Record> records = log.read_all();
-
-                std::vector<std::string> messages;
-                messages.reserve(records.size());
-                for (const auto &rec : records)
+                std::string filename = partition_entry.path().stem().string();
+                if (filename.rfind("partition-", 0) != 0)
                 {
-                    messages.push_back(rec.payload);
+                    continue;
                 }
 
-                topics[topic_name] = std::move(messages);
+                std::string partition_id_str = filename.substr(std::string("partition-").length());
+                int partition_id = std::stoi(partition_id_str);
+
+                kafka::TopicLog log(topic_name, partition_id, data_dir);
+                std::vector<kafka::Record> records = log.read_all();
+
+                if (partition_id >= 0 && partition_id < kDefaultPartitionCount)
+                {
+                    topic.partitions[partition_id].messages.reserve(records.size());
+                    for (const auto &rec : records)
+                    {
+                        topic.partitions[partition_id].messages.push_back(rec.payload);
+                    }
+                    found_any_partition = true;
+                    loaded_messages += records.size();
+                }
+            }
+
+            if (found_any_partition)
+            {
+                topics[topic_name] = std::move(topic);
                 loaded_topics++;
-                loaded_messages += records.size();
             }
         }
 
@@ -90,6 +152,8 @@ namespace
     {
         RequestType type = RequestType::INVALID;
         std::string topic;
+        int partition = -1;
+        std::size_t offset = 0;
         std::string payload;
     };
 
@@ -113,28 +177,112 @@ namespace
         else if (command == "FETCH")
         {
             std::string topic;
-            if (!(stream >> topic))
+            if (!(stream >> topic) || topic.empty())
             {
                 request.type = RequestType::INVALID;
                 return request;
             }
-            if (topic.empty())
+
+            std::string partition_str;
+            if (!(stream >> partition_str))
             {
                 request.type = RequestType::INVALID;
                 return request;
             }
+
+            int partition = -1;
+            try
+            {
+                std::size_t processed_chars = 0;
+                partition = std::stoi(partition_str, &processed_chars);
+                if (processed_chars != partition_str.size())
+                {
+                    request.type = RequestType::INVALID;
+                    return request;
+                }
+            }
+            catch (...)
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            if (partition < 0 || partition >= kDefaultPartitionCount)
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            std::string offset_str;
+            if (!(stream >> offset_str))
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            if (offset_str.empty() || offset_str[0] == '-')
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            std::size_t offset = 0;
+            try
+            {
+                std::size_t processed_chars = 0;
+                unsigned long long parsed_offset = std::stoull(offset_str, &processed_chars);
+                if (processed_chars != offset_str.size())
+                {
+                    request.type = RequestType::INVALID;
+                    return request;
+                }
+                offset = static_cast<std::size_t>(parsed_offset);
+            }
+            catch (...)
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
             request.type = RequestType::FETCH;
             request.topic = topic;
+            request.partition = partition;
+            request.offset = offset;
         }
         else if (command == "PRODUCE")
         {
             std::string topic;
-            if (!(stream >> topic))
+            if (!(stream >> topic) || topic.empty())
             {
                 request.type = RequestType::INVALID;
                 return request;
             }
-            if (topic.empty())
+
+            std::string partition_str;
+            if (!(stream >> partition_str))
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            int partition = -1;
+            try
+            {
+                std::size_t processed_chars = 0;
+                partition = std::stoi(partition_str, &processed_chars);
+                if (processed_chars != partition_str.size())
+                {
+                    request.type = RequestType::INVALID;
+                    return request;
+                }
+            }
+            catch (...)
+            {
+                request.type = RequestType::INVALID;
+                return request;
+            }
+
+            if (partition < 0 || partition >= kDefaultPartitionCount)
             {
                 request.type = RequestType::INVALID;
                 return request;
@@ -144,7 +292,7 @@ namespace
             std::string payload;
             std::getline(stream, payload);
 
-            // Remove leading space from space separator between topic and payload
+            // Remove leading space from space separator between partition and payload
             if (!payload.empty() && payload[0] == ' ')
             {
                 payload.erase(0, 1);
@@ -158,6 +306,7 @@ namespace
 
             request.type = RequestType::PRODUCE;
             request.topic = topic;
+            request.partition = partition;
             request.payload = payload;
         }
         else
@@ -320,14 +469,17 @@ namespace
                 {
                     try
                     {
-                        // 1. Append record to persistent topic log file outside topics_mutex lock
-                        kafka::TopicLog log(parsed.topic);
+                        kafka::TopicLog log(parsed.topic, parsed.partition);
                         log.append(kafka::Record{parsed.payload});
 
-                        // 2. Update in-memory state only after disk append succeeds
                         {
                             std::lock_guard<std::mutex> lock(topics_mutex);
-                            topics[parsed.topic].push_back(parsed.payload);
+                            auto it = topics.find(parsed.topic);
+                            if (it == topics.end())
+                            {
+                                topics[parsed.topic] = Topic(parsed.topic);
+                            }
+                            topics[parsed.topic].partitions[parsed.partition].messages.push_back(parsed.payload);
                         }
 
                         response = "OK";
@@ -352,16 +504,16 @@ namespace
                     }
                     else
                     {
-                        std::vector<std::string> messages = it->second;
+                        const std::vector<std::string> &messages = it->second.partitions[parsed.partition].messages;
 
-                        if (messages.empty())
+                        if (parsed.offset >= messages.size())
                         {
                             response = "";
                         }
                         else
                         {
                             response = "";
-                            for (size_t i = 0; i < messages.size(); ++i)
+                            for (size_t i = parsed.offset; i < messages.size(); ++i)
                             {
                                 response += messages[i];
                                 if (i < messages.size() - 1)
