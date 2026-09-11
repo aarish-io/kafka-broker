@@ -10,6 +10,8 @@
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace kafka
 {
@@ -86,6 +88,8 @@ namespace kafka
 
     void TcpServer::handle_client(int client_fd)
     {
+        std::vector<std::pair<std::string, std::string>> joined_groups;
+
         try
         {
             while (true)
@@ -101,6 +105,23 @@ namespace kafka
                 Request req = parse_request(request_payload);
                 std::string response = broker_.handle_request(req);
 
+                // 6.2.1 A TCP connection owns the group memberships it successfully joined.
+                if (response == "OK" && req.type == RequestType::JOIN)
+                {
+                    joined_groups.emplace_back(req.group_id, req.consumer_id);
+                }
+                else if (response == "OK" && req.type == RequestType::LEAVE)
+                {
+                    for (auto it = joined_groups.begin(); it != joined_groups.end(); ++it)
+                    {
+                        if (it->first == req.group_id && it->second == req.consumer_id)
+                        {
+                            joined_groups.erase(it);
+                            break;
+                        }
+                    }
+                }
+
                 write_frame(client_fd, response);
 
                 std::cout << "sent: " << response << '\n';
@@ -109,6 +130,11 @@ namespace kafka
         catch (const std::exception &error)
         {
             std::cerr << "client handling failed: " << error.what() << '\n';
+        }
+
+        for (const auto &membership : joined_groups)
+        {
+            broker_.remove_consumer_from_group(membership.first, membership.second);
         }
 
         ::close(client_fd);

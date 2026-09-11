@@ -9,6 +9,10 @@ namespace kafka
     {
         PRODUCE,
         FETCH,
+        JOIN,
+        LEAVE,
+        GROUP_POLL,
+        COMMIT,
         PING,
         INVALID
     };
@@ -16,6 +20,8 @@ namespace kafka
     struct Request
     {
         RequestType type = RequestType::INVALID;
+        std::string group_id;
+        std::string consumer_id;
         std::string topic;
         int partition = 0;
         std::uint64_t offset = 0;
@@ -26,7 +32,14 @@ namespace kafka
     // Protocol syntax:
     //   PRODUCE <topic> <partition> <payload>
     //   FETCH <topic> <partition> <offset>
+    //   JOIN <group> <consumer_id> <topic>
+    //   LEAVE <group> <consumer_id>
+    //   GROUP_POLL <group> <consumer_id>
+    //   COMMIT <group> <consumer_id> <topic> <partition> <offset>
     //   PING
+    //
+    // GROUP_POLL response rows are:
+    //   <topic> <partition> <committed_offset>
     Request parse_request(const std::string &raw_request);
 
 } // namespace kafka

@@ -1,20 +1,74 @@
 #include "../src/client.hpp"
+
 #include <algorithm>
+#include <cstdint>
 #include <iostream>
+#include <stdexcept>
+#include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
+
+struct Assignment
+{
+    std::string topic;
+    int partition = 0;
+    std::uint64_t offset = 0;
+};
+
+static std::vector<Assignment> parse_assignments(const std::string &response)
+{
+    std::vector<Assignment> assignments;
+    std::istringstream lines(response);
+    std::string line;
+
+    while (std::getline(lines, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+
+        std::istringstream fields(line);
+        Assignment assignment;
+        if (!(fields >> assignment.topic >> assignment.partition >> assignment.offset))
+        {
+            throw std::runtime_error("Invalid GROUP_POLL assignment response from broker");
+        }
+
+        std::string extra;
+        if (fields >> extra)
+        {
+            throw std::runtime_error("Invalid GROUP_POLL assignment response from broker");
+        }
+
+        assignments.push_back(std::move(assignment));
+    }
+
+    return assignments;
+}
+
+static std::size_t count_messages(const std::string &response)
+{
+    if (response.empty())
+    {
+        return 0;
+    }
+
+    return std::count(response.begin(), response.end(), '\n') + 1;
+}
 
 int main(int argc, char *argv[])
 {
-    // 5.4.1 Validate command-line arguments
     if (argc != 4)
     {
-        std::cerr << "Usage: ./consumer <topic> <partition> <offset>\n";
+        std::cerr << "Usage: ./consumer <topic> <group_id> <consumer_id>\n";
         return 1;
     }
 
     std::string topic = argv[1];
-    std::string partition_str = argv[2];
-    std::string offset_str = argv[3];
+    std::string group_id = argv[2];
+    std::string consumer_id = argv[3];
 
     if (topic.empty())
     {
@@ -22,75 +76,97 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Parse and validate partition argument (must be integer between 0 and 2)
-    int partition = 0;
-    try
+    if (group_id.empty())
     {
-        std::size_t pos = 0;
-        partition = std::stoi(partition_str, &pos);
-        if (pos != partition_str.length() || partition < 0 || partition > 2)
-        {
-            std::cerr << "ERROR: Invalid partition '" << partition_str << "'. Partition must be an integer between 0 and 2.\n";
-            return 1;
-        }
-    }
-    catch (...)
-    {
-        std::cerr << "ERROR: Invalid partition '" << partition_str << "'. Partition must be an integer between 0 and 2.\n";
+        std::cerr << "ERROR: Group ID cannot be empty.\n";
         return 1;
     }
 
-    // Parse and validate initial offset argument (must be a non-negative integer)
-    long long current_offset = 0;
-    try
+    if (consumer_id.empty())
     {
-        std::size_t pos = 0;
-        current_offset = std::stoll(offset_str, &pos);
-        if (pos != offset_str.length() || current_offset < 0)
-        {
-            std::cerr << "ERROR: Invalid offset '" << offset_str << "'. Offset must be a non-negative integer.\n";
-            return 1;
-        }
-    }
-    catch (...)
-    {
-        std::cerr << "ERROR: Invalid offset '" << offset_str << "'. Offset must be a non-negative integer.\n";
+        std::cerr << "ERROR: Consumer ID cannot be empty.\n";
         return 1;
     }
 
-    // 5.4.2 Connect to the broker once over a persistent TCP connection
     try
     {
         kafka::BrokerClient client("127.0.0.1", 9092);
         client.connect();
 
-        // 5.4.3 Sequentially FETCH messages and advance current offset position
+        bool joined = false;
+        std::string join_response = client.request("JOIN " + group_id + " " + consumer_id + " " + topic);
+        if (join_response != "OK")
+        {
+            std::cout << join_response << std::endl;
+            return 1;
+        }
+        joined = true;
+
         while (true)
         {
-            std::string request = "FETCH " + topic + " " + std::to_string(partition) + " " + std::to_string(current_offset);
-
-            // Send FETCH request and receive response over the active connection
-            std::string response = client.request(request);
-
-            // 5.4.4 Parse response, display messages, and update offset position
-            if (response == "ERROR")
+            std::string poll_response = client.request("GROUP_POLL " + group_id + " " + consumer_id);
+            if (poll_response == "ERROR")
             {
-                std::cout << response << std::endl;
+                std::cout << poll_response << std::endl;
                 break;
             }
 
-            if (response.empty())
+            std::vector<Assignment> assignments = parse_assignments(poll_response);
+            if (assignments.empty())
             {
-                // No more messages available at current_offset
                 break;
             }
 
-            // Print received messages
-            std::cout << response << std::endl;
+            bool consumed_any = false;
 
-            // Count messages in response (newline-separated) to advance current_offset
-            std::size_t message_count = std::count(response.begin(), response.end(), '\n') + 1;
-            current_offset += static_cast<long long>(message_count);
+            for (Assignment &assignment : assignments)
+            {
+                std::string fetch_request = "FETCH " + assignment.topic + " " +
+                                            std::to_string(assignment.partition) + " " +
+                                            std::to_string(assignment.offset);
+
+                std::string fetch_response = client.request(fetch_request);
+                if (fetch_response == "ERROR")
+                {
+                    std::cout << fetch_response << std::endl;
+                    consumed_any = false;
+                    break;
+                }
+
+                std::size_t message_count = count_messages(fetch_response);
+                if (message_count == 0)
+                {
+                    continue;
+                }
+
+                std::cout << fetch_response << std::endl;
+                assignment.offset += static_cast<std::uint64_t>(message_count);
+
+                std::string commit_request = "COMMIT " + group_id + " " + consumer_id + " " +
+                                             assignment.topic + " " +
+                                             std::to_string(assignment.partition) + " " +
+                                             std::to_string(assignment.offset);
+
+                std::string commit_response = client.request(commit_request);
+                if (commit_response != "OK")
+                {
+                    std::cout << commit_response << std::endl;
+                    consumed_any = false;
+                    break;
+                }
+
+                consumed_any = true;
+            }
+
+            if (!consumed_any)
+            {
+                break;
+            }
+        }
+
+        if (joined)
+        {
+            client.request("LEAVE " + group_id + " " + consumer_id);
         }
     }
     catch (const std::exception &e)

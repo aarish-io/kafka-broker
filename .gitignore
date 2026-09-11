@@ -17,11 +17,15 @@ CTestTestfile.cmake
 # Binaries and objects
 *.o
 *.obj
+*.a
+*.lib
 *.exe
 *.out
 *.dll
 *.so
 *.dylib
+*.pdb
+*.ilk
 broker
 producer
 consumer
@@ -35,7 +39,9 @@ __pycache__/
 
 # Storage and logs (Stage 3+)
 data/
+logs/
 *.log
+*.pid
 
 # IDE files
 .vscode/
@@ -47,4 +53,3 @@ data/
 # OS clutter
 .DS_Store
 Thumbs.db
-
