@@ -1,6 +1,6 @@
 # Kafka Broker Plan Instructions
 
-Last updated: 2026-09-09
+Last updated: 2026-09-12
 
 This file is the detailed companion to `plan.md`.
 
@@ -56,6 +56,17 @@ When a stage changes, append short notes like:
 - Consumer maintains single connection and issues multiple FETCH requests, advancing offset by counting newline-separated messages in each response.
 - Both clients validate arguments (topic non-empty, partition 0-2, offset non-negative, message non-empty).
 - Manual testing verified: producer→broker communication, consumer FETCH from different offsets, sequential offset progression, partition isolation, invalid argument handling, persistence across broker restart.
+- Status: COMPLETED.
+
+2026-09-12 - Stage 6
+- Completed Stage 6 (Consumer Groups).
+- Implemented Stage 6.1 through Stage 6.6 and tested the final integrated behavior successfully.
+- Added the consumer group model and protocol commands: JOIN, LEAVE, GROUP_POLL, and COMMIT.
+- Implemented broker-side group membership, duplicate consumer ID rejection within a group, and cleanup when a TCP connection disconnects.
+- Implemented deterministic round-robin assignment across the existing 3 partitions per topic, with rebalancing after JOIN, LEAVE, and disconnect cleanup.
+- Implemented in-memory group-owned committed offsets stored by group, topic, and partition.
+- GROUP_POLL returns the current partition assignments plus the committed offset for each assigned partition.
+- Updated the consumer client flow to JOIN -> GROUP_POLL -> FETCH from committed offset -> COMMIT progress -> repeat -> LEAVE.
 - Status: COMPLETED.
 ```
 
@@ -340,29 +351,95 @@ Allow multiple consumers to share partition work.
 
 ### Completion criteria
 
-Stage 6 is done when:
-- consumers in the same group do not all process the same partition copy
-- assignment changes can be explained and demonstrated
+Stage 6 is COMPLETED.
 
-## Stage 7 - Concurrency and Benchmarking
+Completed mini-stages:
+- `6.1` Consumer group model and protocol
+- `6.2` Consumer group membership
+- `6.3` Partition assignment and rebalancing
+- `6.4` Consumer group offset tracking
+- `6.5` Consumer/consumer-group client integration
+- `6.6` Final integration and edge-case testing
+
+Implemented behavior:
+- Consumers join and leave groups through the existing request/response networking model.
+- Duplicate `consumer_id` membership is rejected within the same group.
+- Consumer group membership is cleaned up when the owning TCP connection disconnects.
+- Empty groups are removed when appropriate.
+- Group state is protected by synchronization because the broker still uses multiple client threads.
+- Topic partitions are assigned deterministically with simple round-robin assignment.
+- Rebalancing happens after successful JOIN, LEAVE, and disconnect cleanup.
+- Committed offsets are stored in memory by group, topic, and partition, not by individual consumer.
+- GROUP_POLL returns the current assignments and committed offsets for a valid group member.
+- The consumer client now performs JOIN -> GROUP_POLL -> FETCH from committed offset -> COMMIT progress -> repeat -> LEAVE.
+
+### Stage notes
+
+- 2026-09-12 - Stage 6 completed through mini-stage 6.6.
+- Final integration and edge-case testing verified the completed consumer-group flow.
+- Offsets remain in-memory only.
+- Heartbeats, session timeouts, persistent committed offsets, advanced assignment strategies, replication, and delivery semantics are intentionally deferred to later stages.
+- Next implementation target: Stage 8 (Linux Performance and epoll). Stage 8 has not started.
+
+## Stage 7 - Concurrency and Thread Safety
 
 ### Purpose
 
-Turn the broker from a functional toy into a more robust concurrent system.
+Audit and verify the safety of the existing concurrent broker without prematurely redesigning it.
 
 ### Scope
 
-- shared broker state protection
-- concurrent producers and consumers
-- race-condition testing
-- throughput and latency measurements
+- shared broker state and synchronization boundaries
+- concurrent producer, consumer, and consumer-group behavior
+- race detection with ThreadSanitizer
+- lock-scope and contention review
+- final combined concurrency stress testing
 
 ### Completion criteria
 
-Stage 7 is done when:
-- shared state is safely synchronized
-- we have measurable benchmark output
-- we understand at least one real bottleneck
+Stage 7 is COMPLETED.
+
+### Completed mini-stages
+
+- **7.1 - Concurrency model audit**:
+  - Reviewed the existing thread-per-client `TcpServer` and shared `Broker` model.
+  - Confirmed that topic, partition, and message state is protected by `topics_mutex_`.
+  - Confirmed that consumer-group state is protected by `consumer_groups_mutex_`.
+  - Recorded the only current multiple-lock order: `consumer_groups_mutex_` -> `topics_mutex_` in COMMIT.
+  - No production code changes were required.
+- **7.2 - Concurrent producer safety**:
+  - Added and ran `tests/test_concurrent_producers.py`.
+  - Verified concurrent writes to the same partition and different partitions, concurrent topic creation, successful PRODUCE responses, expected counts and contents, and no message loss or duplication.
+- **7.3 - Producer and consumer concurrency**:
+  - Added and ran `tests/test_producer_consumer_concurrency.py`.
+  - Verified concurrent PRODUCE and FETCH activity while GROUP_POLL and COMMIT operated, with consistent consumer-group progress and no missing or duplicate messages.
+- **7.4 - Consumer-group concurrency**:
+  - Added and ran `tests/test_consumer_group_concurrency.py`.
+  - Verified concurrent JOIN, GROUP_POLL, FETCH, COMMIT, and LEAVE activity.
+  - Verified that exactly one of two concurrent duplicate JOIN requests succeeds and the other fails, while group state remains consistent.
+- **7.5 - Race detection**:
+  - Built the `kafka-broker` target separately with `-fsanitize=thread`, `-fno-omit-frame-pointer`, and `-g`.
+  - Ran the concurrency workloads against the ThreadSanitizer-instrumented broker; no ThreadSanitizer data-race warnings were observed.
+  - The normal build was not replaced or modified.
+  - A pre-existing, unrelated `tests/test_record.cpp` compilation issue prevented the entire CMake test target from building under this configuration. Only the `kafka-broker` target is claimed as successfully built under TSan.
+- **7.6 - Lock scope and contention review**:
+  - Confirmed that current synchronization is correct but coarse-grained.
+  - `PRODUCE` holds `topics_mutex_` during in-memory mutation and synchronous `TopicLog` persistence, including disk I/O and `fsync`.
+  - `FETCH` holds `topics_mutex_` while constructing its response.
+  - Different partitions therefore contend on the same global topic mutex.
+  - This behavior was intentionally retained because changing it safely requires decisions about ordering, persistence failure, and recovery semantics.
+- **7.7 - Final concurrency stress test**:
+  - Added and ran `tests/test_stage7_final_stress.py`.
+  - Verified a combined workload with 6 producers, 3 consumers, 3 partitions, and 300 total messages.
+  - Verified concurrent producer, consumer, and group activity, correct per-partition counts, consistent state, and no message loss or duplication.
+
+### Scope decisions
+
+- Stage 7 did not introduce `epoll`, non-blocking I/O, thread pools, per-partition mutexes, lock-free structures, or another concurrency redesign.
+- The thread-per-client model and the two existing Broker mutexes remain the production architecture.
+- Coarse-grained contention is a known architectural tradeoff, not evidence that the current implementation is unsafe.
+- Serious throughput, latency, observability, and benchmark reporting were moved to Stage 11.
+- Next planned stage: Stage 8 (Linux Performance and epoll). It has not started.
 
 ## Stage 8 - Linux Performance and epoll
 

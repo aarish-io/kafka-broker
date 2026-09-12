@@ -27,6 +27,7 @@ kafka-broker/
 ├── docs/
 ├── data/                 # runtime data, gitignored
 ├── build/                # generated build output, gitignored
+├── build-tsan/           # local sanitizer build output, gitignored
 ├── CMakeLists.txt
 ├── plan.md
 ├── planinstruction.md
@@ -57,6 +58,18 @@ Persistent append-only log
 Consumer follows the same path in reverse for FETCH.
 ```
 
+Consumer-group consumers add a group-coordination step before FETCH:
+
+``` text
+consumer
+  -> JOIN group
+  -> GROUP_POLL assignments and committed offsets
+  -> FETCH assigned partitions from committed offsets
+  -> COMMIT progress
+  -> repeat
+  -> LEAVE
+```
+
 ## Responsibilities
 
 ### `main.cpp`
@@ -68,12 +81,38 @@ storage implementation belongs here.
 ### `broker.hpp / broker.cpp`
 
 Core broker/domain layer. Owns: - topics and partitions - in-memory
-messages - broker state/mutex - PRODUCE and FETCH operations - startup
-recovery
+messages - broker state/mutexes - PRODUCE and FETCH operations - startup
+recovery - consumer groups - group membership - partition assignments -
+group-owned committed offsets
 
 Default model: 3 partitions per topic (0, 1, 2).
 
-This is the natural layer for future consumer-group state.
+Consumer-group model:
+
+``` text
+Broker
+  owns ConsumerGroup map
+
+ConsumerGroup
+  owns members by consumer_id
+  owns committed offsets by TopicPartition
+
+GroupMember
+  owns consumer_id
+  owns subscribed topic
+  owns current TopicPartition assignments
+
+TopicPartition
+  identifies one topic + partition pair
+```
+
+Consumer-group state is in memory and protected by
+`consumer_groups_mutex_`. Topic, partition, and message state is protected
+by `topics_mutex_`.
+
+COMMIT is the only current operation that acquires both mutexes. Its lock
+order is `consumer_groups_mutex_` -> `topics_mutex_`; future code that
+needs both locks must preserve this order.
 
 ### `protocol.hpp / protocol.cpp`
 
@@ -86,6 +125,10 @@ Current commands:
 PING
 PRODUCE <topic> <partition> <payload>
 FETCH <topic> <partition> <offset>
+JOIN <group> <consumer_id> <topic>
+LEAVE <group> <consumer_id>
+GROUP_POLL <group> <consumer_id>
+COMMIT <group> <consumer_id> <topic> <partition> <offset>
 ```
 
 Protocol parsing must remain independent of TCP and storage.
@@ -107,12 +150,21 @@ commands or broker state.
 Server networking layer: - `socket()` - `setsockopt()` - `bind()` -
 `listen()` - `accept()` - client connection lifecycle -
 thread-per-client model - read framed request - parse request - delegate
-to `Broker` - write framed response
+to `Broker` - write framed response - track group memberships owned by a
+TCP connection for disconnect cleanup
 
 Current model is one detached thread per client.
 
+Each client thread accesses the same `Broker` instance owned by
+`main.cpp`. Broker mutexes synchronize shared state; request parsing,
+framing buffers, connection membership tracking, and client sockets remain
+local to their owning client thread.
+
 Do not introduce epoll, non-blocking I/O, thread pools, or async I/O
 until their planned stages.
+
+No `epoll` or non-blocking socket path, thread pool, or per-partition mutex
+has been introduced. These remain future design work.
 
 ### `client.hpp`
 
@@ -153,16 +205,25 @@ and prints the broker response. It does not know about disk or
 CLI:
 
 ``` text
-./consumer <topic> <partition> <offset>
+./consumer <topic> <group_id> <consumer_id>
 ```
 
-Connects once, sequentially issues FETCH requests, starts from the
-supplied offset, advances `current_offset` based on returned messages,
-and stops when no messages remain or the broker returns `ERROR`.
+Connects once and uses the consumer-group protocol:
 
-Not implemented yet: - consumer groups - committed offsets - automatic
-offset persistence - retries/reconnection - batching - async I/O -
-epoll - follow/background polling
+``` text
+JOIN
+  -> GROUP_POLL
+  -> parse assigned partitions and committed offsets
+  -> FETCH assigned partitions from committed offsets
+  -> display fetched messages
+  -> COMMIT resulting progress
+  -> repeat
+  -> LEAVE
+```
+
+Not implemented yet: - persistent committed offsets - retries/reconnection
+- batching - async I/O - epoll - heartbeats - session timeouts - advanced
+rebalance coordination - follow/background polling
 
 ## PRODUCE Flow
 
@@ -192,6 +253,69 @@ consumer
   → consumer
 ```
 
+## Consumer Group Flow
+
+``` text
+consumer
+  -> BrokerClient
+  -> TcpServer
+  -> protocol
+  -> Broker::handle_request()
+  -> JOIN / LEAVE / GROUP_POLL / COMMIT
+  -> ConsumerGroup / GroupMember / TopicPartition state
+```
+
+### JOIN / LEAVE / Disconnect
+
+`JOIN <group> <consumer_id> <topic>` creates the group if needed and adds
+the consumer as a `GroupMember`. A duplicate `consumer_id` in the same
+group is rejected.
+
+`LEAVE <group> <consumer_id>` removes that member. If the group becomes
+empty, the group is removed.
+
+`TcpServer` tracks successful joins for each TCP connection. When that
+connection disconnects, the broker removes those consumers from their
+groups and removes empty groups when appropriate.
+
+### Assignment / Rebalancing
+
+`rebalance_group()` recalculates assignments after successful JOIN,
+LEAVE, and disconnect cleanup.
+
+Assignment is deterministic round-robin over the current members of a
+group for the subscribed topic. The project uses the existing 3-partition
+topic model, so partitions 0, 1, and 2 are distributed across sorted
+consumer IDs. A partition is assigned to at most one consumer in the
+group. A consumer may receive multiple partitions when there are fewer
+consumers than partitions, or zero partitions when there are more
+consumers than partitions.
+
+### GROUP_POLL
+
+`GROUP_POLL <group> <consumer_id>` validates that the group exists and
+that the consumer is currently a member. It returns the member's current
+assignments. Each response line includes:
+
+``` text
+<topic> <partition> <committed_offset>
+```
+
+The committed offset comes from the group's in-memory offset table. If no
+offset has been committed yet for that group/topic/partition, the broker
+returns offset `0`.
+
+### COMMIT
+
+`COMMIT <group> <consumer_id> <topic> <partition> <offset>` validates
+the group, member, topic, and partition, then stores the committed offset
+under the group and `TopicPartition`.
+
+Committed offsets belong to the consumer group rather than the individual
+consumer. If a partition is reassigned to another consumer in the same
+group, that consumer can continue from the group's last committed
+position.
+
 ## Persistence / Recovery
 
 Storage layout:
@@ -217,11 +341,18 @@ TopicLog::read_all()
   ↓
 rebuild in-memory topics/partitions
   ↓
-TcpServer starts
+  TcpServer starts
 ```
+
+`recover_from_disk()` is startup-only. It completes before `TcpServer`
+begins accepting connections and before client threads can access the
+shared Broker.
 
 Clients do not own persistence. The broker reconstructs its in-memory
 state from disk after restart.
+
+Consumer-group committed offsets are currently in-memory only. They are
+not recovered from disk after broker restart.
 
 ## Architectural Rules
 
@@ -237,26 +368,55 @@ state from disk after restart.
 8.  Keep `main.cpp` thin.
 9.  Preserve the wire protocol and persistence format unless a planned
     stage changes them.
-10. Keep future concurrency/epoll work in its planned stages.
-11. Build future consumer-group functionality around `Broker`.
+10. Keep future non-blocking I/O and epoll work in its planned stages.
+11. Keep consumer-group functionality in `Broker`.
+12. Do not add persistent group offsets, heartbeats, session timeouts,
+    advanced assignment strategies, replication, or delivery semantics
+    until their planned stages.
 
-## Stage 5 Baseline
+## Stage 7 Concurrency Baseline
 
-Stage 5 is complete.
+Stage 7 is complete. The runtime architecture remains thread-per-client:
+`TcpServer` creates one detached thread for each connected client, and all
+of those threads share one `Broker` instance.
 
-Completed: - `BrokerClient` - Producer CLI - Consumer CLI - persistent
-client TCP connections - sequential consumer offset progression - client
-validation - shared TCP framing - modular broker/server/protocol
-structure - manual integration testing
+Completed: - `BrokerClient` - Producer CLI - Consumer group-aware
+Consumer CLI - persistent client TCP connections - client validation -
+shared TCP framing - modular broker/server/protocol structure - consumer
+group model and protocol - JOIN/LEAVE membership - duplicate consumer ID
+rejection - TCP disconnect cleanup - deterministic round-robin assignment
+- rebalance after membership changes - group-owned committed offsets -
+GROUP_POLL assignment/offset response - COMMIT handling - final
+integration and edge-case testing
 
-Verified: - producer → broker - consumer FETCH - different starting
-offsets - sequential offset progression - partition isolation - invalid
-input - persistence across broker restart - existing functionality after
-the modular refactor
+Verified: - producer -> broker - consumer group JOIN - GROUP_POLL
+assignment retrieval - FETCH from assigned partitions - COMMIT progress
+- LEAVE cleanup - duplicate consumer ID rejection - disconnect cleanup -
+rebalance after membership changes - partition isolation - invalid input
+- persistence of topic logs across broker restart
+
+Stage 7 added concurrent integration workloads for producers, consumers,
+and consumer groups, plus a final stress workload with 6 producers, 3
+consumers, 3 partitions, and 300 messages. Those tests verified expected
+message contents and counts, no message loss or duplication, and consistent
+consumer-group progress.
+
+A separately built ThreadSanitizer-instrumented `kafka-broker` target ran
+the concurrency workloads without reported data races. This does not claim
+that the entire CMake test target passed under TSan: a pre-existing
+`tests/test_record.cpp` compilation issue prevented that full target build.
+
+The current locking is correct but coarse-grained. `PRODUCE` holds
+`topics_mutex_` through synchronous `TopicLog` persistence, including disk
+I/O and `fsync`, and `FETCH` holds it while constructing the response.
+Operations on different partitions therefore still contend on the same
+global topic mutex. Stage 7 intentionally retained this tradeoff rather
+than changing persistence ordering, failure behavior, or recovery
+semantics. It should not be interpreted as a claim of high scalability.
 
 ## Next Stage
 
-**Stage 6: Consumer Groups**
+**Stage 8: Linux non-blocking I/O and epoll** (`NEXT`; not started)
 
 Future work should build on this architecture instead of moving broker
 logic back into `main.cpp` or client programs.

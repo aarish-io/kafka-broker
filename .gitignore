@@ -6,6 +6,7 @@
 
 # CMake and build outputs
 build/
+build-tsan/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
