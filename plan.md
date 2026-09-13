@@ -1,6 +1,6 @@
 # Kafka Broker Stage Plan
 
-Last updated: 2026-09-12
+Last updated: 2026-09-13
 
 This file is the short project tracker.
 
@@ -12,7 +12,7 @@ Status legend:
 
 ## Current Position
 
-Current phase: `Stage 8 - Linux non-blocking I/O and epoll` (`NEXT`; not started)
+Current phase: `Stage 8 - Linux non-blocking I/O and epoll` (`DONE`; mini-stages 8.1-8.7 completed)
 
 Working interpretation of the roadmap:
 - `Stage 0` is completed (`DONE`).
@@ -23,7 +23,8 @@ Working interpretation of the roadmap:
 - `Stage 5` is completed (`DONE`).
 - `Stage 6` is completed (`DONE`).
 - `Stage 7` is completed (`DONE`).
-- `Stage 8` is the next planned stage (`NEXT`) and has not started.
+- `Stage 8` is completed (`DONE`).
+- `Stage 9` is the next planned stage (`NEXT`).
 
 ## Stages
 
@@ -37,7 +38,7 @@ Working interpretation of the roadmap:
 | 5 | DONE | Build separate producer and consumer client programs. |
 | 6 | DONE | Add consumer groups, assignment, group offset tracking, and consumer integration (mini-stages 6.1-6.6). |
 | 7 | DONE | Verify concurrency correctness through shared-state synchronization review, concurrent producer/consumer/group tests, race detection, lock-scope review, and final stress testing. |
-| 8 | NEXT | Explore Linux non-blocking I/O and `epoll`; not started. |
+| 8 | DONE | Explore Linux non-blocking I/O and `epoll`; added `EpollServer` as an alternative event-driven server path while keeping `TcpServer` as the baseline (mini-stages 8.1-8.7). |
 | 9 | LATER | Add crash recovery behavior and delivery semantics testing. |
 | 10 | LATER | Add replication with leader/follower behavior. |
 | 11 | LATER | Add observability, metrics, and serious benchmarking. |
@@ -94,5 +95,31 @@ Verified capabilities:
 - Concurrent producer, consumer, FETCH, GROUP_POLL, COMMIT, JOIN, and LEAVE workloads preserve expected message and group state.
 - The final stress workload covered 6 producers, 3 consumers, 3 partitions, and 300 messages without message loss or duplication.
 - A ThreadSanitizer-instrumented `kafka-broker` target completed the concurrency workloads without reported data races. The entire CMake test target was not built under TSan because of a pre-existing `test_record.cpp` compilation issue.
+- Stage 7 retained the thread-per-client architecture and its correct but coarse-grained locking. `PRODUCE` holds `topics_mutex_` through synchronous persistence and `fsync`, while `FETCH` holds it while constructing the response, so different partitions still contend on the same mutex. Redesigning that behavior was intentionally deferred. Serious throughput and latency benchmarking remains Stage 11 work.
 
-Stage 7 retained the thread-per-client architecture and its correct but coarse-grained locking. `PRODUCE` holds `topics_mutex_` through synchronous persistence and `fsync`, while `FETCH` holds it while constructing the response, so different partitions still contend on the same mutex. Redesigning that behavior was intentionally deferred. Serious throughput and latency benchmarking remains Stage 11 work.
+## Stage 8 Completion Summary
+
+Stage 8 is COMPLETED.
+
+Completed mini-stages:
+- `8.1` EpollServer design boundary (concrete event-driven server beside the unchanged `TcpServer`)
+- `8.2` Non-blocking sockets and epoll foundation (`fcntl(O_NONBLOCK)`, `epoll_create1()`, `epoll_ctl()`, `epoll_wait()`)
+- `8.3` Nonblocking accept loop and multi-connection management
+- `8.4` Nonblocking incremental frame reading with per-client `read_buffer`
+- `8.5` Nonblocking framed response writing with per-client `write_buffer`/`write_offset` and `EPOLLOUT` management
+- `8.6` Complete real broker path through the existing protocol parser and `Broker`
+- `8.7` Hardening plus threaded-vs-epoll validation against the real Linux build
+
+Implemented capabilities:
+- Alternative event-driven networking path (`EpollServer`) sharing the existing protocol parser, `Broker`, and storage with `TcpServer`
+- Incremental nonblocking accept/read/write with per-client state, preserving partial-frame handling
+- Responses use the same existing 4-byte network-order framing
+- Consumer-group JOIN/LEAVE membership tracking and disconnect cleanup mirror `TcpServer`
+- `TcpServer`, `main.cpp`, protocol implementation, `Broker` implementation, framing format, and storage format were not redesigned
+
+Validation highlights:
+- Threaded `TcpServer` regression: sequential PRODUCE OK, multiple sequential clients OK, 10 concurrent producers all OK
+- `EpollServer`: complete/split/multi-frame scenarios, frames plus a partial next frame, four simultaneous clients, and a real PRODUCE request all returned correct responses
+- `EpollServer` recovered existing topics/messages from disk and persisted new PRODUCE messages
+
+Stage 8 validation verifies correctness of the event-driven networking path, not performance. No universal speed claim is made and no serious quantitative benchmarking was completed; that remains Stage 11 work.

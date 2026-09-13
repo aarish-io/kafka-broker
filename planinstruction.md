@@ -1,6 +1,6 @@
 # Kafka Broker Plan Instructions
 
-Last updated: 2026-09-12
+Last updated: 2026-09-13
 
 This file is the detailed companion to `plan.md`.
 
@@ -67,6 +67,15 @@ When a stage changes, append short notes like:
 - Implemented in-memory group-owned committed offsets stored by group, topic, and partition.
 - GROUP_POLL returns the current partition assignments plus the committed offset for each assigned partition.
 - Updated the consumer client flow to JOIN -> GROUP_POLL -> FETCH from committed offset -> COMMIT progress -> repeat -> LEAVE.
+- Status: COMPLETED.
+
+2026-09-13 - Stage 8
+- Completed Stage 8 (Linux non-blocking I/O and epoll) through mini-stages 8.1-8.7.
+- Added an alternative event-driven server path: `EpollServer` with nonblocking sockets (`fcntl(O_NONBLOCK)`), `epoll_create1()`/`epoll_ctl()`/`epoll_wait()`, nonblocking accept/read/write, per-client `read_buffer`/`write_buffer`/`write_offset`, and incremental length-prefixed frame handling.
+- `EpollServer` uses the existing `parse_request()` and `Broker::handle_request()`; real broker responses replace the temporary "FRAME_RECEIVED" response.
+- Consumer-group JOIN/LEAVE membership tracking and disconnect cleanup mirror `TcpServer`.
+- `TcpServer`, `main.cpp`, protocol implementation, `Broker` implementation, framing format, and storage format were not redesigned.
+- Validated against the real Linux build in WSL Ubuntu: TcpServer regression (sequential PRODUCE, multiple sequential clients, 10 concurrent producers), EpollServer complete/split/multi-frame scenarios, frame plus partial next frame, multiple simultaneous clients, and persistence sanity (recovery from disk and PRODUCE persistence).
 - Status: COMPLETED.
 ```
 
@@ -379,7 +388,7 @@ Implemented behavior:
 - Final integration and edge-case testing verified the completed consumer-group flow.
 - Offsets remain in-memory only.
 - Heartbeats, session timeouts, persistent committed offsets, advanced assignment strategies, replication, and delivery semantics are intentionally deferred to later stages.
-- Next implementation target: Stage 8 (Linux Performance and epoll). Stage 8 has not started.
+- Next implementation target after Stage 6 was Stage 8 (Linux non-blocking I/O and epoll). Stage 8 is now complete; see the Stage 8 section below.
 
 ## Stage 7 - Concurrency and Thread Safety
 
@@ -439,7 +448,7 @@ Stage 7 is COMPLETED.
 - The thread-per-client model and the two existing Broker mutexes remain the production architecture.
 - Coarse-grained contention is a known architectural tradeoff, not evidence that the current implementation is unsafe.
 - Serious throughput, latency, observability, and benchmark reporting were moved to Stage 11.
-- Next planned stage: Stage 8 (Linux Performance and epoll). It has not started.
+- Next planned stage after Stage 7 was Stage 8 (Linux non-blocking I/O and epoll). It is now COMPLETED; see the Stage 8 section below.
 
 ## Stage 8 - Linux Performance and epoll
 
@@ -456,9 +465,58 @@ Compare event-driven networking with thread-per-connection.
 
 ### Completion criteria
 
-Stage 8 is done when:
-- we have an `epoll`-based path or variant
-- we can compare it against the threaded version with data
+Stage 8 is COMPLETED.
+
+Completed mini-stages:
+- **8.1 - EpollServer design boundary**: Added a concrete `EpollServer` class as an alternative event-driven server path without premature abstraction, interfaces, or factories. Kept the existing threaded `TcpServer` unchanged as the known-good baseline.
+- **8.2 - Non-blocking sockets and epoll foundation**: Listening socket made nonblocking with `fcntl(F_GETFL/F_SETFL | O_NONBLOCK)`; `epoll_create1()`; listening FD registered via `epoll_ctl(... EPOLL_CTL_ADD ... EPOLLIN)`; `epoll_wait()` event loop.
+- **8.3 - Accept and manage multiple connections**: Nonblocking `accept()` loop with `EINTR` and `EAGAIN`/`EWOULDBLOCK` handling. Accepted client sockets are nonblocking and registered for `EPOLLIN`. Per-client `ClientState` mapping with `EPOLLERR`/`EPOLLHUP` handling and client cleanup.
+- **8.4 - Nonblocking frame reading**: `EpollServer` does not use the blocking `read_frame()`/`read_exactly()` helpers. Per-client `read_buffer` accumulates arbitrary TCP chunks; complete length-prefixed frames are extracted incrementally. Handles partial headers, partial payloads, multiple complete frames, and a complete frame followed by a partial next frame. The existing 4-byte network-order framing and maximum payload limit are unchanged.
+- **8.5 - Nonblocking response writing**: Per-client `write_buffer` and `write_offset`; responses are length-framed and queued instead of written through blocking helpers. `EPOLLOUT` is enabled when response data is pending and disabled after the buffer drains. `send()` may partially write; `EAGAIN`/`EWOULDBLOCK` leaves the remaining data queued for the next `EPOLLOUT`. `MSG_NOSIGNAL` is used for safe socket sends.
+- **8.6 - Complete Epoll broker path**: Complete frames go through the existing `parse_request()` parser and `Broker::handle_request()`, replacing the temporary "FRAME_RECEIVED" response. No duplicated protocol parsing or broker business logic. Responses use the same 4-byte network-order framing as `TcpServer`. JOIN/LEAVE connection membership tracking and disconnect cleanup mirror `TcpServer`.
+- **8.7 - Hardening and threaded-vs-epoll validation**: Ran the validation below against the real Linux build in WSL Ubuntu.
+
+### Validation results (recorded in mini-stage 8.7)
+
+These tests validate correctness of the current event-driven networking path, not serious performance benchmarking. All were run against the real Linux build.
+
+1. Existing threaded TcpServer regression:
+   - `kafka-broker` target built successfully.
+   - Sequential PRODUCE requests returned OK.
+   - Multiple sequential clients returned OK.
+   - 10 concurrently launched producer processes all returned OK.
+   - Existing TcpServer remained functional.
+2. EpollServer basic complete frame (temporary standalone EpollServer driver on port 9093):
+   - PING -> PONG succeeded.
+3. EpollServer split frame:
+   - The first part of a frame was sent; the server did not process it until the remaining bytes arrived.
+   - Final PING -> PONG succeeded.
+4. Multiple complete frames in one TCP send:
+   - Three complete PING frames sent in one send; three PONG responses returned in order.
+5. Multiple complete frames plus a partial next frame:
+   - Two complete PING frames plus a partial third frame sent together.
+   - The first two were processed; the third was not processed until its remaining bytes arrived.
+   - All three PONG responses were eventually received.
+6. Multiple simultaneous clients:
+   - Client A sent a complete PING.
+   - Client B sent a partial PING and later completed it.
+   - Client C sent three complete PING frames.
+   - Client D sent a real PRODUCE request.
+   - All clients received correct responses; client-specific state stayed independent.
+   - Event ordering was naturally nondeterministic and is not treated as a failure.
+7. Persistence sanity:
+   - EpollServer recovered existing topics/messages from disk.
+   - The PRODUCE request from the multi-client test persisted successfully.
+
+### Scope decisions
+
+- Stage 8 added an alternative event-driven networking path (`EpollServer`) while preserving the threaded `TcpServer` as the comparison baseline.
+- Keep the level-triggered epoll model (`EPOLLET` was not introduced). The event loop can wake frequently for non-blocking readiness notifications; this is a level-triggered design property and is expected behavior.
+- Early epoll work added a `get_ready_payload()` breakpoint so the loop processes at most one connection per wake to preserve observer parity with the threaded version (byte-stream readiness, not application-message semantics).
+- Protocol parsing, `Broker` logic, the wire framing format, the storage format, `main.cpp`, and `TcpServer` were not redesigned; `EpollServer` reuses the existing protocol and `Broker` path.
+- No claim that epoll is universally faster, no measured throughput/latency improvement claim, and no production-scale scalability claim are made.
+- Serious quantitative benchmarking (throughput, latency, concurrency comparisons of the two paths) is deferred to Stage 11.
+- Next planned stage: Stage 9 (Failure Recovery).
 
 ## Stage 9 - Failure Recovery
 

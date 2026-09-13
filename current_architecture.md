@@ -20,6 +20,8 @@ kafka-broker/
 │   ├── framing.hpp
 │   ├── tcp_server.hpp
 │   ├── tcp_server.cpp
+│   ├── epoll_server.hpp
+│   ├── epoll_server.cpp
 │   ├── client.hpp
 │   ├── record.hpp
 │   └── topic_log.hpp
@@ -41,21 +43,31 @@ Producer
   ↓
 BrokerClient
   ↓ TCP + 4-byte length framing
-TcpServer
-  ↓
-Framing
-  ↓
-Protocol Parser
-  ↓
-Broker
-  ↓
-Topic / Partition
-  ↓
-TopicLog / Record
-  ↓
-Persistent append-only log
+Client
+  ├──> TcpServer (thread-per-client)
+  │
+  └──> EpollServer (event-driven / nonblocking)
+                     |
+                     v
+              Protocol Parser
+                     |
+                     v
+                  Broker
+                     |
+                     v
+           Topic / Partition
+                     |
+                     v
+            TopicLog / Record
+                     |
+                     v
+         Persistent append-only log
 
-Consumer follows the same path in reverse for FETCH.
+Both server paths share the same Protocol Parser -> Broker -> Storage
+pipeline. Frame reconstruction differs by server: TcpServer uses the
+blocking framing.hpp helpers, while EpollServer reconstructs frames
+incrementally from per-client read buffers. Consumer follows the same
+path in reverse for FETCH.
 ```
 
 Consumer-group consumers add a group-coordination step before FETCH:
@@ -76,7 +88,9 @@ consumer
 
 Thin application entry point. Constructs `Broker`, performs startup
 recovery, constructs `TcpServer`, and starts it. No protocol, socket, or
-storage implementation belongs here.
+storage implementation belongs here. `main.cpp` still starts `TcpServer`;
+`EpollServer` exists as a comparison/testing path that is not started by
+`main.cpp` yet.
 
 ### `broker.hpp / broker.cpp`
 
@@ -160,11 +174,77 @@ Each client thread accesses the same `Broker` instance owned by
 framing buffers, connection membership tracking, and client sockets remain
 local to their owning client thread.
 
-Do not introduce epoll, non-blocking I/O, thread pools, or async I/O
-until their planned stages.
+`TcpServer` is retained unchanged as the known-good comparison baseline for
+the Stage 8 event-driven `EpollServer` path. Do not mix epoll or
+non-blocking I/O into `TcpServer` itself, and do not duplicate broker
+business logic inside either server.
 
-No `epoll` or non-blocking socket path, thread pool, or per-partition mutex
-has been introduced. These remain future design work.
+### `epoll_server.hpp / epoll_server.cpp`
+
+`kafka::EpollServer`, the event-driven alternative networking path added in
+Stage 8 (mini-stages 8.1-8.7). Uses the same protocol parser, `Broker`, and
+storage as `TcpServer`; no protocol parsing or broker business logic is
+duplicated here.
+
+Features:
+- Linux/POSIX non-blocking sockets via `fcntl(F_GETFL/F_SETFL | O_NONBLOCK)`
+- `epoll_create1()`, `epoll_ctl()`, `epoll_wait()` with the level-triggered
+  epoll model (`EPOLLET` is not used)
+- nonblocking `accept()` loop with `EINTR` and `EAGAIN`/`EWOULDBLOCK`
+  handling; `EPOLLERR`/`EPOLLHUP` cause client cleanup
+- per-client incremental frame reading through `read_buffer` (the blocking
+  `read_frame()`/`read_exactly()` helpers are not used here)
+- per-client queued response writing through `write_buffer`/`write_offset`
+  with `EPOLLOUT` management; `MSG_NOSIGNAL` used for `send()`
+- complete frames -> `parse_request()` -> `Broker::handle_request()` ->
+  length-framed response queued through the nonblocking write path
+- consumer-group JOIN/LEAVE membership tracking and disconnect cleanup,
+  mirroring `TcpServer`
+
+Per-client state:
+
+``` text
+ClientState
+├── fd
+├── read_buffer
+├── write_buffer
+├── write_offset
+└── joined_groups
+```
+
+Event loop:
+
+``` text
+epoll_wait()
+    |
+    +-- listening FD  -> accept clients (nonblocking)
+    |
+    +-- client EPOLLIN -> read into read_buffer
+    |                         |
+    |                         v
+    |               extract complete frames
+    |                         |
+    |                         v
+    |                 parse_request()
+    |                         |
+    |                         v
+    |               Broker::handle_request()
+    |                         |
+    |                         v
+    |          queue framed response in write_buffer
+    |
+    +-- client EPOLLOUT -> send from write_buffer
+                              |
+                              v
+                   remove bytes sent, advance write_offset
+```
+
+Byte-stream semantics: TCP delivers a byte stream, not application
+messages. `EPOLLIN` means the socket can currently make read progress (not
+that a complete application frame is available); `EPOLLOUT` means the
+socket can currently make write progress (not that one `send()` must carry
+a whole response). Per-client buffers reconstruct the existing
+length-prefixed application frames and keep client-specific data separate.
 
 ### `client.hpp`
 
@@ -230,7 +310,7 @@ rebalance coordination - follow/background polling
 ``` text
 producer
   → BrokerClient
-  → TcpServer
+  → TcpServer / EpollServer
   → framing
   → protocol
   → Broker::handle_request()
@@ -244,7 +324,7 @@ producer
 ``` text
 consumer
   → BrokerClient
-  → TcpServer
+  → TcpServer / EpollServer
   → framing
   → protocol
   → Broker::handle_request()
@@ -258,7 +338,7 @@ consumer
 ``` text
 consumer
   -> BrokerClient
-  -> TcpServer
+  -> TcpServer / EpollServer
   -> protocol
   -> Broker::handle_request()
   -> JOIN / LEAVE / GROUP_POLL / COMMIT
@@ -274,9 +354,9 @@ group is rejected.
 `LEAVE <group> <consumer_id>` removes that member. If the group becomes
 empty, the group is removed.
 
-`TcpServer` tracks successful joins for each TCP connection. When that
-connection disconnects, the broker removes those consumers from their
-groups and removes empty groups when appropriate.
+Both `TcpServer` and `EpollServer` track successful joins for each TCP
+connection. When that connection disconnects, the broker removes those
+consumers from their groups and removes empty groups when appropriate.
 
 ### Assignment / Rebalancing
 
@@ -341,12 +421,12 @@ TopicLog::read_all()
   ↓
 rebuild in-memory topics/partitions
   ↓
-  TcpServer starts
+  server starts accepting (TcpServer or EpollServer)
 ```
 
-`recover_from_disk()` is startup-only. It completes before `TcpServer`
-begins accepting connections and before client threads can access the
-shared Broker.
+`recover_from_disk()` is startup-only. It completes before either server
+path begins accepting connections and before clients can access the shared
+Broker.
 
 Clients do not own persistence. The broker reconstructs its in-memory
 state from disk after restart.
@@ -364,7 +444,7 @@ not recovered from disk after broker restart.
     unnecessary frameworks.
 5.  Clients must not access storage internals.
 6.  Framing must not know PRODUCE/FETCH semantics.
-7.  `TcpServer` must delegate broker business logic.
+7.  `TcpServer` and `EpollServer` must delegate broker business logic.
 8.  Keep `main.cpp` thin.
 9.  Preserve the wire protocol and persistence format unless a planned
     stage changes them.
@@ -414,9 +494,45 @@ global topic mutex. Stage 7 intentionally retained this tradeoff rather
 than changing persistence ordering, failure behavior, or recovery
 semantics. It should not be interpreted as a claim of high scalability.
 
+## Stage 8 EpollServer Baseline
+
+Stage 8 is complete (mini-stages 8.1-8.7). It added an alternative
+event-driven networking path (`EpollServer`) alongside the original
+threaded `TcpServer`, which is retained unchanged as the comparison
+baseline.
+
+`EpollServer` is functionally equivalent to `TcpServer` at the broker
+boundary: both feed the same length-prefixed wire format through
+`parse_request()` into `Broker::handle_request()` and return the same
+logical responses with the same 4-byte network-order framing. The
+difference is networking only: thread-per-client blocking I/O in
+`TcpServer` versus a single event loop with nonblocking I/O in
+`EpollServer`.
+
+`main.cpp` still starts `TcpServer`. `EpollServer` is a
+comparison/testing path and is not yet the runtime default.
+
+Recorded Stage 8 validation (WSL Ubuntu, real Linux build):
+- TcpServer regression: sequential PRODUCE OK, multiple sequential clients
+  OK, 10 concurrent producer processes all OK.
+- EpollServer: PING -> PONG; a split frame was processed only after its
+  remaining bytes arrived; three complete frames in one send returned
+  three PONGs in order; two complete frames plus a partial third; four
+  simultaneous clients (complete PING, partial-then-completed PING, three
+  PINGs, real PRODUCE) all received correct responses with independent
+  client state; recovery of existing topics/messages from disk and
+  persistence of the produced message verified.
+
+These tests validate correctness of the event-driven path, not serious
+performance benchmarking. No claim is made that epoll is universally
+faster, no throughput/latency improvement was measured, and no
+production-grade scalability was proven. Quantitative benchmarking of the
+two paths remains Stage 11 work.
+
 ## Next Stage
 
-**Stage 8: Linux non-blocking I/O and epoll** (`NEXT`; not started)
+**Stage 9: Failure Recovery** (`NEXT`)
 
-Future work should build on this architecture instead of moving broker
-logic back into `main.cpp` or client programs.
+Stage 8 (Linux non-blocking I/O and epoll) is complete. Future work should
+build on this architecture instead of moving broker logic back into
+`main.cpp` or client programs.

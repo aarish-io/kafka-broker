@@ -11,6 +11,7 @@ add_executable(kafka-broker
     src/broker.cpp
     src/protocol.cpp
     src/tcp_server.cpp
+    src/epoll_server.cpp
 )
 
 target_include_directories(kafka-broker PRIVATE ${CMAKE_SOURCE_DIR}/src)
