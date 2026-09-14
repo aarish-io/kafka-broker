@@ -33,6 +33,13 @@ consumer
 test_record
 test_topic_log
 
+# Temporary stage test drivers/harnesses
+epoll_stage*_driver
+epoll_stage*_driver.cpp
+temp_stage*_harness
+temp_stage*_harness.cpp
+temp_stage*_test.py
+
 # Python
 __pycache__/
 *.pyc

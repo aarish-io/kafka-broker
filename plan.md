@@ -1,6 +1,6 @@
 # Kafka Broker Stage Plan
 
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 
 This file is the short project tracker.
 
@@ -12,7 +12,7 @@ Status legend:
 
 ## Current Position
 
-Current phase: `Stage 8 - Linux non-blocking I/O and epoll` (`DONE`; mini-stages 8.1-8.7 completed)
+Current phase: `Stage 9 - Failure Recovery` (`DONE`)
 
 Working interpretation of the roadmap:
 - `Stage 0` is completed (`DONE`).
@@ -24,7 +24,8 @@ Working interpretation of the roadmap:
 - `Stage 6` is completed (`DONE`).
 - `Stage 7` is completed (`DONE`).
 - `Stage 8` is completed (`DONE`).
-- `Stage 9` is the next planned stage (`NEXT`).
+- `Stage 9` is completed (`DONE`).
+- `Stage 10` is the next planned stage (`NEXT`).
 
 ## Stages
 
@@ -39,8 +40,8 @@ Working interpretation of the roadmap:
 | 6 | DONE | Add consumer groups, assignment, group offset tracking, and consumer integration (mini-stages 6.1-6.6). |
 | 7 | DONE | Verify concurrency correctness through shared-state synchronization review, concurrent producer/consumer/group tests, race detection, lock-scope review, and final stress testing. |
 | 8 | DONE | Explore Linux non-blocking I/O and `epoll`; added `EpollServer` as an alternative event-driven server path while keeping `TcpServer` as the baseline (mini-stages 8.1-8.7). |
-| 9 | LATER | Add crash recovery behavior and delivery semantics testing. |
-| 10 | LATER | Add replication with leader/follower behavior. |
+| 9 | DONE | Add crash recovery behavior, persistent record integrity, and delivery semantics documentation. |
+| 10 | NEXT | Add replication with leader/follower behavior. |
 | 11 | LATER | Add observability, metrics, and serious benchmarking. |
 | 12 | LATER | Polish documentation, CI, testing, and resume-ready project material. |
 
@@ -123,3 +124,24 @@ Validation highlights:
 - `EpollServer` recovered existing topics/messages from disk and persisted new PRODUCE messages
 
 Stage 8 validation verifies correctness of the event-driven networking path, not performance. No universal speed claim is made and no serious quantitative benchmarking was completed; that remains Stage 11 work.
+
+## Stage 9 Completion Summary
+
+Stage 9 is COMPLETED.
+
+Implemented and verified capabilities:
+- Topic/partition logs survive broker restart and records are recovered from disk.
+- Persistent records now use `[4-byte big-endian payload length][payload bytes][4-byte big-endian CRC32]`.
+- CRC32 covers the serialized length bytes followed by the payload bytes.
+- Record deserialization validates CRC before accepting the record or advancing the recovery offset.
+- Incomplete final records and CRC-corrupt records are detected during recovery.
+- Recovery stops at the first invalid record and truncates the log back to the last valid record boundary.
+- Current consumer delivery behavior is at-least-once-style: FETCH does not advance committed group progress, messages may be delivered again if a consumer fails before COMMIT, and COMMIT advances the committed offset.
+- Committed offsets are associated with consumer group + topic/partition, not with individual consumer connections.
+- Consumer-group committed offsets survive consumer reassignment while the broker process remains alive.
+
+Current limitation:
+- Topic/partition messages are persistent and recovered from disk.
+- Consumer-group committed offsets are in-memory only and are lost on broker restart.
+- After broker restart, a group with no recovered committed offset currently begins from offset 0.
+- Persistent consumer offsets, exactly-once semantics, and Kafka-level production guarantees are not claimed.

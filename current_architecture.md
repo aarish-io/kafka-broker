@@ -260,11 +260,30 @@ Producer and consumer use this instead of raw socket APIs.
 
 Record/message representation for storage.
 
+Persistent record format:
+
+``` text
+[4-byte big-endian payload length]
+[payload bytes]
+[4-byte big-endian CRC32]
+```
+
+CRC32 covers the exact serialized length bytes followed by the payload
+bytes. Deserialization validates the stored CRC before accepting the
+record, assigning the payload, or advancing the supplied recovery offset.
+
 ### `topic_log.hpp`
 
 Persistent partition log: - append records - read records - persistent
 append-only storage - existing durability behavior including `fsync` -
-existing storage layout and format
+existing storage layout and CRC-protected record format
+
+`TopicLog::read_all()` reads valid records until record deserialization
+fails. If unread bytes remain, recovery treats them as an invalid trailing
+record region and truncates the file back to the last valid record
+boundary. This handles both incomplete final records and CRC-corrupt
+records. Recovery does not attempt to reconstruct invalid records or scan
+past the first invalid record.
 
 Do not put broker/network/protocol logic here.
 
@@ -432,7 +451,26 @@ Clients do not own persistence. The broker reconstructs its in-memory
 state from disk after restart.
 
 Consumer-group committed offsets are currently in-memory only. They are
-not recovered from disk after broker restart.
+not recovered from disk after broker restart. Topic/partition messages are
+persistent and recovered from disk, but committed group progress is lost
+when the broker process restarts. After restart, a group with no recovered
+committed offset currently begins from offset `0`.
+
+## Delivery Semantics
+
+The current implementation provides at-least-once-style consumer behavior.
+`FETCH` reads messages but does not advance committed group progress. If a
+consumer receives messages and fails or disconnects before `COMMIT`, those
+messages may be delivered again.
+
+`COMMIT` advances the committed offset for the consumer group and
+topic/partition. Committed offsets are not tied to an individual consumer
+connection, so if a consumer disappears and another member takes over, the
+previously committed offset remains available while the broker process is
+still alive.
+
+Consumer-group offsets are not persisted yet. The broker does not provide
+exactly-once semantics or Kafka-level production guarantees.
 
 ## Architectural Rules
 
@@ -451,8 +489,8 @@ not recovered from disk after broker restart.
 10. Keep future non-blocking I/O and epoll work in its planned stages.
 11. Keep consumer-group functionality in `Broker`.
 12. Do not add persistent group offsets, heartbeats, session timeouts,
-    advanced assignment strategies, replication, or delivery semantics
-    until their planned stages.
+    advanced assignment strategies, replication, or stronger delivery
+    semantics until their planned stages.
 
 ## Stage 7 Concurrency Baseline
 
@@ -531,8 +569,8 @@ two paths remains Stage 11 work.
 
 ## Next Stage
 
-**Stage 9: Failure Recovery** (`NEXT`)
+**Stage 10: Replication** (`NEXT`)
 
-Stage 8 (Linux non-blocking I/O and epoll) is complete. Future work should
+Stage 9 (Failure Recovery) is complete. Future work should
 build on this architecture instead of moving broker logic back into
 `main.cpp` or client programs.

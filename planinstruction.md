@@ -1,6 +1,6 @@
 # Kafka Broker Plan Instructions
 
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 
 This file is the detailed companion to `plan.md`.
 
@@ -76,6 +76,17 @@ When a stage changes, append short notes like:
 - Consumer-group JOIN/LEAVE membership tracking and disconnect cleanup mirror `TcpServer`.
 - `TcpServer`, `main.cpp`, protocol implementation, `Broker` implementation, framing format, and storage format were not redesigned.
 - Validated against the real Linux build in WSL Ubuntu: TcpServer regression (sequential PRODUCE, multiple sequential clients, 10 concurrent producers), EpollServer complete/split/multi-frame scenarios, frame plus partial next frame, multiple simultaneous clients, and persistence sanity (recovery from disk and PRODUCE persistence).
+- Status: COMPLETED.
+
+2026-09-14 - Stage 9
+- Completed Stage 9 (Failure Recovery).
+- Persistent records now use `[4-byte big-endian payload length][payload bytes][4-byte big-endian CRC32]`.
+- CRC32 covers the serialized length bytes plus payload bytes.
+- Invalid or incomplete trailing records are discarded by truncating the log to the last valid record boundary.
+- Current consumer delivery behavior is at-least-once-style: FETCH does not commit progress, so messages may be delivered again before COMMIT.
+- Consumer-group committed offsets are group/topic/partition-owned and survive consumer reassignment while the broker process remains alive.
+- Consumer-group committed offsets are not persisted and are lost on broker restart; groups without recovered committed offsets begin from offset 0.
+- No offset persistence, migration/versioning, exactly-once semantics, or Kafka-level guarantee system was introduced because it is outside Stage 9 scope.
 - Status: COMPLETED.
 ```
 
@@ -533,10 +544,25 @@ Handle broken states and recovery more intentionally.
 
 ### Completion criteria
 
+Stage 9 is COMPLETED.
+
 Stage 9 is done when:
 - restart recovery is tested
 - duplicate delivery and failure cases are documented
 - the chosen semantics are explicit
+
+### Stage notes
+
+- 2026-09-14 - Stage 9 completed and manually verified.
+- Existing topic/partition logs survive broker restart and records are recovered from disk.
+- Persistent records include CRC32 after the payload; CRC covers `[length bytes][payload bytes]`.
+- `TopicLog::read_all()` recovery accepts valid records until `deserialize_record()` fails, then truncates the log to the last valid boundary.
+- Incomplete final records and CRC-corrupt records are treated as invalid trailing records; recovery does not attempt reconstruction or scanning past the first invalid record.
+- Delivery behavior is at-least-once-style: FETCH alone does not advance committed group progress, and duplicate delivery is possible if a consumer receives messages but fails or disconnects before COMMIT.
+- COMMIT advances the committed offset for the consumer group and topic/partition, not for an individual connection.
+- Consumer-group offsets remain available across reassignment while the broker process stays alive.
+- Consumer-group offsets are in-memory only and are lost on broker restart. After restart, a group with no recovered committed offset begins at offset 0.
+- Persistent offset storage and migration/versioning were not implemented in Stage 9.
 
 ## Stage 10 - Replication
 

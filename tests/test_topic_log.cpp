@@ -117,11 +117,94 @@ void test_topic_log_incomplete_final_record_truncation()
     std::cout << "[PASS] test_topic_log_incomplete_final_record_truncation\n";
 }
 
+void test_topic_log_corrupt_record_truncation()
+{
+    std::string test_dir = "test_data_crc_corruption";
+    std::filesystem::remove_all(test_dir);
+
+    kafka::TopicLog log("events", 2, test_dir);
+
+    kafka::Record r1{"event-1"};
+    kafka::Record r2{"event-2"};
+    kafka::Record r3{"event-3"};
+
+    log.append(r1);
+    log.append(r2);
+    log.append(r3);
+
+    const std::size_t corrupt_record_start =
+        kafka::serialize_record(r1).size() + kafka::serialize_record(r2).size();
+
+    std::ifstream input(log.log_path(), std::ios::binary);
+    assert(input.is_open());
+    std::string buffer((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+    input.close();
+
+    assert(buffer.size() == corrupt_record_start + kafka::serialize_record(r3).size());
+
+    const std::size_t r3_payload_start = corrupt_record_start + sizeof(std::uint32_t);
+    buffer[r3_payload_start] ^= 0x01;
+
+    std::ofstream output(log.log_path(), std::ios::binary | std::ios::trunc);
+    assert(output.is_open());
+    output.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    output.close();
+
+    std::vector<kafka::Record> records = log.read_all();
+    assert(records.size() == 2);
+    assert(records[0].payload == "event-1");
+    assert(records[1].payload == "event-2");
+    assert(std::filesystem::file_size(log.log_path()) == corrupt_record_start);
+
+    std::filesystem::remove_all(test_dir);
+    std::cout << "[PASS] test_topic_log_corrupt_record_truncation\n";
+}
+
+void test_topic_log_incomplete_crc_truncation()
+{
+    std::string test_dir = "test_data_incomplete_crc";
+    std::filesystem::remove_all(test_dir);
+
+    kafka::TopicLog log("events", 3, test_dir);
+
+    kafka::Record r1{"event-1"};
+    kafka::Record r2{"event-2"};
+
+    log.append(r1);
+    log.append(r2);
+
+    const std::size_t incomplete_record_start = kafka::serialize_record(r1).size();
+
+    std::ifstream input(log.log_path(), std::ios::binary);
+    assert(input.is_open());
+    std::string buffer((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+    input.close();
+
+    buffer.resize(buffer.size() - 2);
+
+    std::ofstream output(log.log_path(), std::ios::binary | std::ios::trunc);
+    assert(output.is_open());
+    output.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    output.close();
+
+    std::vector<kafka::Record> records = log.read_all();
+    assert(records.size() == 1);
+    assert(records[0].payload == "event-1");
+    assert(std::filesystem::file_size(log.log_path()) == incomplete_record_start);
+
+    std::filesystem::remove_all(test_dir);
+    std::cout << "[PASS] test_topic_log_incomplete_crc_truncation\n";
+}
+
 int main()
 {
     test_topic_log_append_and_readback();
     test_topic_log_invalid_constructor_args();
     test_topic_log_incomplete_final_record_truncation();
+    test_topic_log_corrupt_record_truncation();
+    test_topic_log_incomplete_crc_truncation();
 
     std::cout << "All TopicLog tests passed successfully!\n";
     return 0;
