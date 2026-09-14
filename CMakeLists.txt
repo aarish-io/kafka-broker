@@ -23,3 +23,16 @@ add_executable(test_record
 add_executable(test_topic_log
     tests/test_topic_log.cpp
 )
+
+add_executable(test_protocol_parse
+    tests/test_protocol_parse.cpp
+    src/protocol.cpp
+)
+
+add_executable(test_broker_replicate
+    tests/test_broker_replicate.cpp
+    src/broker.cpp
+    src/protocol.cpp
+)
+
+target_include_directories(test_broker_replicate PRIVATE ${CMAKE_SOURCE_DIR}/src)

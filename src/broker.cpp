@@ -1,4 +1,5 @@
 #include "broker.hpp"
+#include "client.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -18,8 +19,21 @@ namespace kafka
         }
     }
 
+    void Broker::configure(BrokerRole role, int follower_port)
+    {
+        role_ = role;
+        follower_port_ = follower_port;
+    }
+
+    void Broker::promote_to_leader()
+    {
+        role_ = BrokerRole::LEADER;
+        follower_port_ = -1;
+    }
+
     void Broker::recover_from_disk(const std::string &data_dir)
     {
+        data_dir_ = data_dir;
         std::error_code ec;
         if (!std::filesystem::exists(data_dir, ec) || !std::filesystem::is_directory(data_dir, ec))
         {
@@ -86,13 +100,19 @@ namespace kafka
                 found_any_partition = true;
 
                 // Read records from the partition log file
-                TopicLog log(topic_name, partition_id, data_dir);
+                TopicLog log(topic_name, partition_id, data_dir_);
                 std::vector<Record> records = log.read_all();
 
                 for (const auto &record : records)
                 {
                     topic.partitions[partition_id].messages.push_back(record.payload);
                     ++loaded_messages;
+                }
+
+                if (role_ == BrokerRole::FOLLOWER && !records.empty())
+                {
+                    replication_progress_[TopicPartition{topic_name, partition_id}] =
+                        static_cast<std::uint64_t>(records.size() - 1);
                 }
             }
 
@@ -113,8 +133,24 @@ namespace kafka
         case RequestType::PING:
             return "PONG";
 
+        case RequestType::REPLICATION_PROGRESS:
+        {
+            if (role_ != BrokerRole::FOLLOWER)
+            {
+                return "ERROR";
+            }
+
+            std::optional<std::uint64_t> progress = get_replication_progress(req.topic, req.partition);
+            return progress.has_value() ? std::to_string(*progress) : "NONE";
+        }
+
         case RequestType::PRODUCE:
         {
+            if (role_ == BrokerRole::LEADER && follower_port_ > 0)
+            {
+                synchronize_follower();
+            }
+
             std::lock_guard<std::mutex> lock(topics_mutex_);
 
             // Get or create topic
@@ -131,13 +167,73 @@ namespace kafka
                 return "ERROR";
             }
 
+            const std::uint64_t offset = topic.partitions[req.partition].messages.size();
+
             // Append to in-memory partition
             topic.partitions[req.partition].messages.push_back(req.payload);
 
             // Persist to disk
-            TopicLog log(req.topic, req.partition);
+            TopicLog log(req.topic, req.partition, data_dir_);
             log.append(Record{req.payload});
 
+            if (role_ == BrokerRole::LEADER && follower_port_ > 0)
+            {
+                try
+                {
+                    BrokerClient follower_client("127.0.0.1", follower_port_);
+                    follower_client.connect();
+
+                    std::ostringstream replication_request;
+                    replication_request << "REPLICATE " << req.topic << ' '
+                                        << req.partition << ' ' << offset << ' '
+                                        << req.payload;
+                    if (follower_client.request(replication_request.str()) != "OK")
+                    {
+                        return "ERROR";
+                    }
+                }
+                catch (const std::exception &)
+                {
+                    return "ERROR";
+                }
+            }
+
+            return "OK";
+        }
+
+        case RequestType::REPLICATE:
+        {
+            if (role_ != BrokerRole::FOLLOWER)
+            {
+                return "ERROR";
+            }
+
+            std::lock_guard<std::mutex> lock(topics_mutex_);
+
+            auto it = topics_.find(req.topic);
+            if (it == topics_.end())
+            {
+                it = topics_.emplace(req.topic, Topic(req.topic)).first;
+            }
+            Topic &topic = it->second;
+
+            if (req.partition < 0 || req.partition >= static_cast<int>(topic.partitions.size()))
+            {
+                return "ERROR";
+            }
+
+            try
+            {
+                TopicLog log(req.topic, req.partition, data_dir_);
+                log.append(Record{req.payload});
+            }
+            catch (const std::exception &)
+            {
+                return "ERROR";
+            }
+
+            replication_progress_[TopicPartition{req.topic, req.partition}] = req.offset;
+            topic.partitions[req.partition].messages.push_back(req.payload);
             return "OK";
         }
 
@@ -194,6 +290,169 @@ namespace kafka
         default:
             return "ERROR";
         }
+    }
+
+    std::optional<std::uint64_t> Broker::get_replication_progress(const std::string &topic,
+                                                                  int partition)
+    {
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+
+        auto it = replication_progress_.find(TopicPartition{topic, partition});
+        if (it == replication_progress_.end())
+        {
+            return std::nullopt;
+        }
+
+        return it->second;
+    }
+
+    std::vector<std::string> Broker::get_missing_records(const std::string &topic,
+                                                         int partition,
+                                                         std::optional<std::uint64_t> follower_progress)
+    {
+        std::lock_guard<std::mutex> lock(topics_mutex_);
+
+        auto topic_it = topics_.find(topic);
+        if (topic_it == topics_.end() || partition < 0 ||
+            partition >= static_cast<int>(topic_it->second.partitions.size()))
+        {
+            return {};
+        }
+
+        const std::vector<std::string> &messages = topic_it->second.partitions[partition].messages;
+        if (messages.empty())
+        {
+            return {};
+        }
+
+        std::size_t first_missing = 0;
+        if (follower_progress.has_value())
+        {
+            if (*follower_progress >= messages.size() - 1)
+            {
+                return {};
+            }
+            first_missing = static_cast<std::size_t>(*follower_progress + 1);
+        }
+
+        return std::vector<std::string>(messages.begin() + static_cast<std::ptrdiff_t>(first_missing),
+                                        messages.end());
+    }
+
+    bool Broker::catch_up_follower(const std::string &topic,
+                                   int partition,
+                                   std::optional<std::uint64_t> follower_progress)
+    {
+        if (role_ != BrokerRole::LEADER)
+        {
+            return false;
+        }
+
+        std::vector<std::string> missing_records =
+            get_missing_records(topic, partition, follower_progress);
+        if (missing_records.empty())
+        {
+            return true;
+        }
+
+        if (follower_port_ <= 0)
+        {
+            return false;
+        }
+
+        const std::uint64_t first_missing_offset = follower_progress.has_value()
+                                                       ? *follower_progress + 1
+                                                       : 0;
+
+        try
+        {
+            BrokerClient follower_client("127.0.0.1", follower_port_);
+            follower_client.connect();
+
+            for (std::size_t index = 0; index < missing_records.size(); ++index)
+            {
+                std::ostringstream replication_request;
+                replication_request << "REPLICATE " << topic << ' ' << partition << ' '
+                                    << first_missing_offset + index << ' ' << missing_records[index];
+                if (follower_client.request(replication_request.str()) != "OK")
+                {
+                    return false;
+                }
+            }
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    std::optional<std::uint64_t> Broker::query_follower_progress(const std::string &topic,
+                                                                 int partition)
+    {
+        BrokerClient follower_client("127.0.0.1", follower_port_);
+        follower_client.connect();
+
+        std::ostringstream progress_request;
+        progress_request << "REPLICATION_PROGRESS " << topic << ' ' << partition;
+        std::string response = follower_client.request(progress_request.str());
+
+        if (response == "NONE")
+        {
+            return std::nullopt;
+        }
+
+        std::size_t parsed_length = 0;
+        std::uint64_t progress = std::stoull(response, &parsed_length);
+        if (parsed_length != response.size())
+        {
+            throw std::runtime_error("invalid follower replication progress response");
+        }
+
+        return progress;
+    }
+
+    bool Broker::synchronize_follower()
+    {
+        if (role_ != BrokerRole::LEADER || follower_port_ <= 0)
+        {
+            return false;
+        }
+
+        std::vector<TopicPartition> partitions;
+        {
+            std::lock_guard<std::mutex> lock(topics_mutex_);
+            for (const auto &topic_entry : topics_)
+            {
+                for (const Partition &partition : topic_entry.second.partitions)
+                {
+                    if (!partition.messages.empty())
+                    {
+                        partitions.push_back(TopicPartition{topic_entry.first, partition.id});
+                    }
+                }
+            }
+        }
+
+        for (const TopicPartition &topic_partition : partitions)
+        {
+            try
+            {
+                std::optional<std::uint64_t> progress =
+                    query_follower_progress(topic_partition.topic, topic_partition.partition);
+                if (!catch_up_follower(topic_partition.topic, topic_partition.partition, progress))
+                {
+                    return false;
+                }
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     std::string Broker::join_group(const Request &req)

@@ -30,6 +30,25 @@ namespace kafka
         }
     }
 
+    static bool parse_non_negative_int(const std::string &value, int &result)
+    {
+        try
+        {
+            size_t pos = 0;
+            int parsed_value = std::stoi(value, &pos);
+            if (pos != value.length() || parsed_value < 0)
+            {
+                return false;
+            }
+            result = parsed_value;
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     static bool parse_offset(const std::string &offset_str, std::uint64_t &offset)
     {
         try
@@ -131,6 +150,66 @@ namespace kafka
             }
 
             req.type = RequestType::FETCH;
+            req.topic = topic;
+            return req;
+        }
+
+        if (command == "REPLICATE")
+        {
+            std::string topic;
+            std::string partition_str;
+            std::string offset_str;
+            std::string payload;
+
+            if (!(iss >> topic >> partition_str >> offset_str))
+            {
+                return req; // INVALID
+            }
+
+            std::getline(iss, payload);
+            size_t first_non_space = payload.find_first_not_of(' ');
+            if (first_non_space != std::string::npos)
+            {
+                payload = payload.substr(first_non_space);
+            }
+
+            if (topic.empty() || payload.empty())
+            {
+                return req; // INVALID
+            }
+
+            if (!parse_non_negative_int(partition_str, req.partition))
+            {
+                return req; // INVALID
+            }
+
+            if (!parse_offset(offset_str, req.offset))
+            {
+                return req; // INVALID
+            }
+
+            req.type = RequestType::REPLICATE;
+            req.topic = topic;
+            req.payload = payload;
+            return req;
+        }
+
+        if (command == "REPLICATION_PROGRESS")
+        {
+            std::string topic;
+            std::string partition_str;
+
+            if (!(iss >> topic >> partition_str) || has_extra_tokens(iss))
+            {
+                return req; // INVALID
+            }
+
+            if (!parse_non_negative_int(partition_str, req.partition))
+            {
+                return req; // INVALID
+            }
+
+            req.type = RequestType::REPLICATION_PROGRESS;
             req.topic = topic;
             return req;
         }

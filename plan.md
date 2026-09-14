@@ -12,7 +12,7 @@ Status legend:
 
 ## Current Position
 
-Current phase: `Stage 9 - Failure Recovery` (`DONE`)
+Current phase: `Stage 10 - Replication` (`DONE`)
 
 Working interpretation of the roadmap:
 - `Stage 0` is completed (`DONE`).
@@ -25,7 +25,7 @@ Working interpretation of the roadmap:
 - `Stage 7` is completed (`DONE`).
 - `Stage 8` is completed (`DONE`).
 - `Stage 9` is completed (`DONE`).
-- `Stage 10` is the next planned stage (`NEXT`).
+- `Stage 10` is completed (`DONE`).
 
 ## Stages
 
@@ -41,9 +41,29 @@ Working interpretation of the roadmap:
 | 7 | DONE | Verify concurrency correctness through shared-state synchronization review, concurrent producer/consumer/group tests, race detection, lock-scope review, and final stress testing. |
 | 8 | DONE | Explore Linux non-blocking I/O and `epoll`; added `EpollServer` as an alternative event-driven server path while keeping `TcpServer` as the baseline (mini-stages 8.1-8.7). |
 | 9 | DONE | Add crash recovery behavior, persistent record integrity, and delivery semantics documentation. |
-| 10 | NEXT | Add replication with leader/follower behavior. |
+| 10 | DONE | Add simplified leader/follower replication, catch-up, and explicit failover. |
 | 11 | LATER | Add observability, metrics, and serious benchmarking. |
 | 12 | LATER | Polish documentation, CI, testing, and resume-ready project material. |
+
+## Stage 10 Completion Summary
+
+Stage 10 is COMPLETED.
+
+Implemented capabilities:
+- Two-broker leader/follower replication with independent broker data directories.
+- Internal `REPLICATE <topic> <partition> <offset> <payload>` requests over the existing framed TCP request/response path.
+- Synchronous follower persistence and acknowledgement before a leader `PRODUCE` returns `OK`.
+- Per-topic-partition follower replication progress, including recovery from persisted records.
+- Internal `REPLICATION_PROGRESS` queries, missing-record detection, and ordered follower catch-up.
+- Follower restart recovery and catch-up triggered by the next leader `PRODUCE`.
+- Explicit `Broker::promote_to_leader()` promotion with post-promotion local `PRODUCE` and persistence.
+- Final Stage 10 validation covering replication, synchronous ACK behavior, lag, restart catch-up, progress recovery, manual promotion, post-promotion persistence, failure behavior, and data-directory isolation.
+
+Intentional limitations:
+- No automatic failure detection, leader election, Raft/KRaft, quorum, ISR, or controller.
+- No replication retry system or consumer-offset replication.
+- Promotion is explicit/manual and has no runtime TCP promotion command.
+- Catch-up is initiated by the next leader `PRODUCE`; there is no background synchronization manager.
 
 ## How We Will Use This File
 

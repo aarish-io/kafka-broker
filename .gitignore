@@ -50,6 +50,7 @@ data/
 logs/
 *.log
 *.pid
+AGENTS.md
 
 # IDE files
 .vscode/

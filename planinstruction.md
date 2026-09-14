@@ -564,6 +564,20 @@ Stage 9 is done when:
 - Consumer-group offsets are in-memory only and are lost on broker restart. After restart, a group with no recovered committed offset begins at offset 0.
 - Persistent offset storage and migration/versioning were not implemented in Stage 9.
 
+2026-09-14 - Stage 10
+- Completed Stage 10 (simplified replication, follower catch-up, and explicit failover) through mini-stages 10.3.1-10.5.4, followed by final validation in 10.6.
+- Added leader/follower roles with independent data directories. `TopicLog` remains the persistence layer, including its existing durable append and `fsync` behavior.
+- Added internal `REPLICATE <topic> <partition> <offset> <payload>` handling. It uses the existing partition/message index model, where `messages[index]` is the logical offset, and follower progress is tracked separately for each `TopicPartition`.
+- Leader `PRODUCE` persists locally first, sends `REPLICATE` through the existing framed TCP request/response mechanism, waits for follower `OK`, and only then returns `OK` when a follower is configured.
+- Added `REPLICATION_PROGRESS` queries so a leader can obtain the follower's recovered progress. `get_missing_records()` identifies records after that progress, and `catch_up_follower()` replays them in logical offset order, waiting for an acknowledgement after each record.
+- Follower progress is reconstructed from recovered persisted records; no metadata file or second persistence subsystem was introduced.
+- Added explicit/manual `Broker::promote_to_leader()`. Promotion retains recovered topics, partitions, data, and progress, clears the old follower configuration, and enables the existing local `PRODUCE` path without contacting the failed old leader.
+- `TcpServer` remains the runtime server and `EpollServer` remains an alternative networking path sharing the same Broker logic; neither was redesigned or removed.
+- Final validation passed: native CMake build, record, TopicLog, protocol, broker replication, two-broker replication, synchronous ACK, follower lag, restart catch-up, already-caught-up behavior, progress recovery, manual promotion, post-promotion PRODUCE and persistence, data-directory isolation, and `git diff --check`.
+- Validation used temporary isolated broker directories and temporary promotion harnesses; those artifacts were removed afterward.
+- Intentionally excluded: automatic failure detection, automatic leader election, heartbeats, retries, quorum/ISR, Raft/KRaft, a controller, client redirection, consumer-offset replication, and a background synchronization manager. Catch-up is triggered by the next leader `PRODUCE`.
+- Status: COMPLETED.
+
 ## Stage 10 - Replication
 
 ### Purpose
@@ -577,11 +591,21 @@ Add a simplified leader/follower replication model.
 - follower catch-up
 - leadership failover experiments
 
+### Implemented design
+
+- A leader and follower use independent data directories and the existing `TopicLog` append-only persistence layer.
+- `REPLICATE` is an internal broker-to-broker operation. Normal leader `PRODUCE` waits for the follower's `OK` response after durable persistence before returning `OK`.
+- Offsets remain zero-based partition/message indexes. Replication progress is tracked independently by `TopicPartition` and recovered from the follower's persisted records.
+- The leader queries follower progress, calls `get_missing_records()`, and uses `catch_up_follower()` to replay missing records in order with one synchronous acknowledgement per record.
+- Explicit promotion changes a follower to a standalone leader without rewriting its logs. The promoted broker uses the existing local `PRODUCE` path.
+
 ### Completion criteria
 
-Stage 10 is done when:
-- one broker can replicate to another in a controlled setup
-- replication lag or progress can be observed
+Stage 10 is COMPLETED. Final validation confirmed controlled two-broker replication, synchronous acknowledgement behavior, follower lag, restart recovery and catch-up, already-caught-up behavior, replication progress recovery, manual promotion, post-promotion persistence, failure behavior, and independent data directories.
+
+### Intentional boundaries
+
+Automatic failure detection, automatic leader election, heartbeats, retry policies, quorum/ISR, Raft/KRaft, controller behavior, client redirection, consumer-offset replication, and background synchronization are outside this simplified educational stage. There is no runtime TCP promotion command; promotion is explicit/manual, and catch-up begins on the next leader `PRODUCE`.
 
 ## Stage 11 - Observability and Serious Benchmarking
 

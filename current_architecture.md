@@ -95,9 +95,10 @@ storage implementation belongs here. `main.cpp` still starts `TcpServer`;
 ### `broker.hpp / broker.cpp`
 
 Core broker/domain layer. Owns: - topics and partitions - in-memory
-messages - broker state/mutexes - PRODUCE and FETCH operations - startup
-recovery - consumer groups - group membership - partition assignments -
-group-owned committed offsets
+messages - broker state/mutexes - leader/follower roles - PRODUCE and FETCH
+operations - replication progress and catch-up - startup recovery -
+consumer groups - group membership - partition assignments - group-owned
+committed offsets
 
 Default model: 3 partitions per topic (0, 1, 2).
 
@@ -133,7 +134,7 @@ needs both locks must preserve this order.
 Protocol representation and parsing: - `RequestType` - `Request` -
 `parse_request()`
 
-Current commands:
+Current client commands:
 
 ``` text
 PING
@@ -143,6 +144,13 @@ JOIN <group> <consumer_id> <topic>
 LEAVE <group> <consumer_id>
 GROUP_POLL <group> <consumer_id>
 COMMIT <group> <consumer_id> <topic> <partition> <offset>
+```
+
+Internal broker command syntax also includes:
+
+``` text
+REPLICATE <topic> <partition> <offset> <payload>
+REPLICATION_PROGRESS <topic> <partition>
 ```
 
 Protocol parsing must remain independent of TCP and storage.
@@ -456,6 +464,111 @@ persistent and recovered from disk, but committed group progress is lost
 when the broker process restarts. After restart, a group with no recovered
 committed offset currently begins from offset `0`.
 
+## Stage 10 Replication Architecture
+
+Stage 10 implements a simplified educational two-broker leader/follower
+model. Each broker has an independent configured data directory. The
+existing `TcpServer` and `EpollServer` remain separate networking paths;
+both share protocol parsing and `Broker` logic. `main.cpp` currently starts
+`TcpServer`.
+
+The broker boundary is:
+
+``` text
+Client
+  ↓
+TcpServer / EpollServer
+  ↓
+protocol parsing
+  ↓
+Broker
+```
+
+Normal leader `PRODUCE` flow:
+
+``` text
+Producer
+  ↓
+Leader Broker
+  ↓
+local TopicLog append/fsync
+  ↓
+REPLICATE
+  ↓
+Follower Broker
+  ↓
+Follower TopicLog append/fsync
+  ↓
+OK
+  ↓
+Leader returns PRODUCE OK
+```
+
+`REPLICATE` is an internal broker-to-broker operation using the existing
+length-prefixed TCP request/response framing. The leader waits for the
+follower's `OK` response before returning successful `PRODUCE` when a
+follower is configured. Offsets continue to use the existing zero-based
+partition/message index model: `messages[index]` is logical offset `index`.
+
+Follower progress is tracked independently for each `TopicPartition`. A
+successful follower append updates that progress only after
+`TopicLog::append()` completes. On follower restart, progress is derived
+from the number of valid recovered records; no separate metadata file is
+used.
+
+Follower catch-up flow:
+
+``` text
+Leader
+  ↓
+REPLICATION_PROGRESS
+  ↓
+Follower reports recovered replication progress
+  ↓
+get_missing_records()
+  ↓
+catch_up_follower()
+  ↓
+ordered REPLICATE requests
+  ↓
+follower persistence + ACK
+  ↓
+caught up
+  ↓
+normal PRODUCE continues
+```
+
+Catch-up is initiated by the next leader `PRODUCE`; there is no background
+synchronization manager, retry system, or automatic restart detection.
+
+Failover flow:
+
+``` text
+Follower
+  ↓
+explicit promote_to_leader()
+  ↓
+Leader
+  ↓
+existing recovered topics/partitions remain available
+  ↓
+normal PRODUCE path
+```
+
+Promotion is explicit/manual. It retains the follower's recovered data and
+clears its old follower configuration, so the promoted broker does not
+contact the failed old leader. The model does not provide automatic
+failure detection, leader election, Raft, KRaft, quorum consensus, ISR
+management, a controller, client redirection, or Kafka wire compatibility.
+
+Stage 10 final validation passed for native build, record/TopicLog/protocol
+and broker replication tests, two-broker replication, synchronous ACKs,
+follower lag, follower restart and catch-up, already-caught-up behavior,
+progress recovery, manual promotion, post-promotion PRODUCE and
+persistence, data-directory isolation, and `git diff --check`. Validation
+used temporary isolated data directories and temporary promotion harnesses,
+which were removed afterward.
+
 ## Delivery Semantics
 
 The current implementation provides at-least-once-style consumer behavior.
@@ -489,8 +602,9 @@ exactly-once semantics or Kafka-level production guarantees.
 10. Keep future non-blocking I/O and epoll work in its planned stages.
 11. Keep consumer-group functionality in `Broker`.
 12. Do not add persistent group offsets, heartbeats, session timeouts,
-    advanced assignment strategies, replication, or stronger delivery
-    semantics until their planned stages.
+    advanced assignment strategies, or stronger delivery semantics until
+    their planned stages. Stage 10 replication remains intentionally
+    simplified as documented above.
 
 ## Stage 7 Concurrency Baseline
 
@@ -569,8 +683,8 @@ two paths remains Stage 11 work.
 
 ## Next Stage
 
-**Stage 10: Replication** (`NEXT`)
+**Stage 11: Observability and Serious Benchmarking** (`LATER`)
 
-Stage 9 (Failure Recovery) is complete. Future work should
-build on this architecture instead of moving broker logic back into
-`main.cpp` or client programs.
+Stage 10 (Replication) is complete. Future work should build on this
+architecture instead of moving broker logic back into `main.cpp` or client
+programs.

@@ -13,6 +13,8 @@ namespace kafka
         LEAVE,
         GROUP_POLL,
         COMMIT,
+        REPLICATE,
+        REPLICATION_PROGRESS,
         PING,
         INVALID
     };
@@ -36,6 +38,7 @@ namespace kafka
     //   LEAVE <group> <consumer_id>
     //   GROUP_POLL <group> <consumer_id>
     //   COMMIT <group> <consumer_id> <topic> <partition> <offset>
+    //   REPLICATE <topic> <partition> <offset> <payload>
     //   PING
     //
     // GROUP_POLL response rows are:
