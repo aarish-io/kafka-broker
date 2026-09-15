@@ -42,7 +42,7 @@ Working interpretation of the roadmap:
 | 8 | DONE | Explore Linux non-blocking I/O and `epoll`; added `EpollServer` as an alternative event-driven server path while keeping `TcpServer` as the baseline (mini-stages 8.1-8.7). |
 | 9 | DONE | Add crash recovery behavior, persistent record integrity, and delivery semantics documentation. |
 | 10 | DONE | Add simplified leader/follower replication, catch-up, and explicit failover. |
-| 11 | LATER | Add observability, metrics, and serious benchmarking. |
+| 11 | IN PROGRESS | Add observability, metrics, and serious benchmarking. |
 | 12 | LATER | Polish documentation, CI, testing, and resume-ready project material. |
 
 ## Stage 10 Completion Summary

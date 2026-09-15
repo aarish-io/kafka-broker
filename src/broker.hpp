@@ -3,6 +3,7 @@
 #include "record.hpp"
 #include "topic_log.hpp"
 #include "protocol.hpp"
+#include "metrics.hpp"
 
 #include <cstdint>
 #include <map>
@@ -102,6 +103,12 @@ namespace kafka
         std::optional<std::uint64_t> get_replication_progress(const std::string &topic,
                                                               int partition);
 
+        // Expose the current broker/server metrics snapshot for benchmark and
+        // reporting code. The latency values are server-side request processing
+        // latency in microseconds, measured from request receipt to response
+        // readiness inside the broker.
+        MetricsSnapshot get_metrics_snapshot() const;
+
         // Return payloads whose logical offsets follow the follower's progress.
         std::vector<std::string> get_missing_records(const std::string &topic,
                                                      int partition,
@@ -128,6 +135,7 @@ namespace kafka
         std::map<TopicPartition, std::uint64_t> replication_progress_;
         std::mutex topics_mutex_;
         std::mutex consumer_groups_mutex_;
+        Metrics metrics_;
 
         BrokerRole role_ = BrokerRole::LEADER;
         int follower_port_ = -1;

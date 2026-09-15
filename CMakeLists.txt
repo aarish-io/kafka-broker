@@ -12,6 +12,8 @@ add_executable(kafka-broker
     src/protocol.cpp
     src/tcp_server.cpp
     src/epoll_server.cpp
+    src/metrics.cpp
+    src/server_mode.cpp
 )
 
 target_include_directories(kafka-broker PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -33,6 +35,16 @@ add_executable(test_broker_replicate
     tests/test_broker_replicate.cpp
     src/broker.cpp
     src/protocol.cpp
+    src/metrics.cpp
+)
+
+add_executable(test_stage11_metrics
+    tests/test_stage11_metrics.cpp
+    src/broker.cpp
+    src/protocol.cpp
+    src/metrics.cpp
+    src/server_mode.cpp
 )
 
 target_include_directories(test_broker_replicate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(test_stage11_metrics PRIVATE ${CMAKE_SOURCE_DIR}/src)

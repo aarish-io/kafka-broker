@@ -128,20 +128,31 @@ namespace kafka
 
     std::string Broker::handle_request(const Request &req)
     {
+        const auto start_time = std::chrono::steady_clock::now();
+        std::uint64_t request_bytes = static_cast<std::uint64_t>(
+            req.topic.size() + req.group_id.size() + req.consumer_id.size() + req.payload.size() + 32U);
+        bool success = false;
+        std::string response;
+
         switch (req.type)
         {
         case RequestType::PING:
-            return "PONG";
+            response = "PONG";
+            success = true;
+            break;
 
         case RequestType::REPLICATION_PROGRESS:
         {
             if (role_ != BrokerRole::FOLLOWER)
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             std::optional<std::uint64_t> progress = get_replication_progress(req.topic, req.partition);
-            return progress.has_value() ? std::to_string(*progress) : "NONE";
+            response = progress.has_value() ? std::to_string(*progress) : "NONE";
+            success = true;
+            break;
         }
 
         case RequestType::PRODUCE:
@@ -164,7 +175,8 @@ namespace kafka
             // Validate partition
             if (req.partition < 0 || req.partition >= static_cast<int>(topic.partitions.size()))
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             const std::uint64_t offset = topic.partitions[req.partition].messages.size();
@@ -189,23 +201,28 @@ namespace kafka
                                         << req.payload;
                     if (follower_client.request(replication_request.str()) != "OK")
                     {
-                        return "ERROR";
+                        response = "ERROR";
+                        break;
                     }
                 }
                 catch (const std::exception &)
                 {
-                    return "ERROR";
+                    response = "ERROR";
+                    break;
                 }
             }
 
-            return "OK";
+            response = "OK";
+            success = true;
+            break;
         }
 
         case RequestType::REPLICATE:
         {
             if (role_ != BrokerRole::FOLLOWER)
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             std::lock_guard<std::mutex> lock(topics_mutex_);
@@ -219,7 +236,8 @@ namespace kafka
 
             if (req.partition < 0 || req.partition >= static_cast<int>(topic.partitions.size()))
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             try
@@ -229,12 +247,15 @@ namespace kafka
             }
             catch (const std::exception &)
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             replication_progress_[TopicPartition{req.topic, req.partition}] = req.offset;
             topic.partitions[req.partition].messages.push_back(req.payload);
-            return "OK";
+            response = "OK";
+            success = true;
+            break;
         }
 
         case RequestType::FETCH:
@@ -244,7 +265,8 @@ namespace kafka
 
             if (it == topics_.end())
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             Topic &topic = it->second;
@@ -252,17 +274,20 @@ namespace kafka
             // Validate partition
             if (req.partition < 0 || req.partition >= static_cast<int>(topic.partitions.size()))
             {
-                return "ERROR";
+                response = "ERROR";
+                break;
             }
 
             const std::vector<std::string> &messages = topic.partitions[req.partition].messages;
 
             if (req.offset >= messages.size())
             {
-                return "";
+                response = "";
+                success = true;
+                break;
             }
 
-            std::string response;
+            response.clear();
             for (size_t i = req.offset; i < messages.size(); ++i)
             {
                 response += messages[i];
@@ -271,25 +296,39 @@ namespace kafka
                     response += '\n';
                 }
             }
-            return response;
+            success = true;
+            break;
         }
 
         case RequestType::JOIN:
-            return join_group(req);
+            response = join_group(req);
+            success = (response == "OK");
+            break;
 
         case RequestType::LEAVE:
-            return leave_group(req);
+            response = leave_group(req);
+            success = (response == "OK");
+            break;
 
         case RequestType::GROUP_POLL:
-            return group_poll(req);
+            response = group_poll(req);
+            success = (response != "ERROR");
+            break;
 
         case RequestType::COMMIT:
-            return commit_offset(req);
+            response = commit_offset(req);
+            success = (response == "OK");
+            break;
 
         case RequestType::INVALID:
         default:
-            return "ERROR";
+            response = "ERROR";
+            break;
         }
+
+        const auto elapsed = std::chrono::steady_clock::now() - start_time;
+        metrics_.record_request(req.type, success, request_bytes, elapsed);
+        return response;
     }
 
     std::optional<std::uint64_t> Broker::get_replication_progress(const std::string &topic,
@@ -304,6 +343,11 @@ namespace kafka
         }
 
         return it->second;
+    }
+
+    MetricsSnapshot Broker::get_metrics_snapshot() const
+    {
+        return metrics_.snapshot();
     }
 
     std::vector<std::string> Broker::get_missing_records(const std::string &topic,
