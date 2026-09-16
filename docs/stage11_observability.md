@@ -73,9 +73,64 @@ The benchmark reports:
 
 The measured interval covers only the actual workload execution and intentionally does not include broker startup or recovery time unless the caller explicitly chooses to do so.
 
+## Controlled TCP versus epoll experiment
+
+The controlled experiment runner is `benchmarks/run_tcp_vs_epoll.py`. It compares the existing `TcpServer` and `EpollServer` implementations while varying concurrent producer count.
+
+Each run uses:
+
+- payload size: 1024 bytes
+- messages per producer: 1000
+- topic: `benchmark`
+- partition: `0`
+- producer counts: `1`, `2`, `4`, `8`, `16`
+- repetitions: 3 per server mode and producer count
+
+The default matrix contains 30 runs. TCP starts with the normal broker command; epoll starts with the existing `--epoll` option. Every run uses a fresh temporary broker data directory, waits for the broker socket to accept connections, and stores its raw result in the consolidated CSV:
+
+```bash
+python3 benchmarks/run_tcp_vs_epoll.py
+```
+
+Results are stored in `benchmark-results/tcp_vs_epoll_concurrency.csv`. The runner preserves each individual benchmark row and adds a `repetition` column; it does not average or interpret the measurements. For a small sanity run, use overrides such as:
+
+```bash
+python3 benchmarks/run_tcp_vs_epoll.py \
+  --producers 1 \
+  --messages 3 \
+  --repetitions 1 \
+  --output /tmp/tcp_vs_epoll_sanity.csv
+```
+
+The runner terminates the exact broker child process after each run, including failed and interrupted runs where practical. It reports the configuration of any failed run and does not write a substitute result row.
+
 ## Plotting support
 
-A very small CSV consumer lives in `benchmarks/plot_benchmarks.py`. It validates that the result file exists and prints the CSV content in a basic readable form. This keeps plotting support lightweight and avoids adding external plotting dependencies.
+The existing raw TCP versus epoll experiment can be analyzed without rerunning it:
+
+```bash
+python3 benchmarks/analyze_tcp_vs_epoll.py \
+  benchmark-results/tcp_vs_epoll_concurrency.csv
+```
+
+The analysis reads the raw CSV only. It validates the expected two modes, five producer counts, and three repetitions per configuration. For each mode and producer count it calculates the arithmetic mean and sample standard deviation for:
+
+- messages/sec
+- bytes/sec
+- p50 server-side latency in microseconds
+- p95 server-side latency in microseconds
+- p99 server-side latency in microseconds
+
+The three repetitions are not weighted or recomputed from total durations; each run contributes one value to the corresponding mean. The aggregate summary is written to `benchmark-results/tcp_vs_epoll_analysis/tcp_vs_epoll_concurrency_summary.csv`. Four graphs are written alongside it:
+
+- `throughput_vs_concurrency.png`
+- `p50_latency_vs_concurrency.png`
+- `p95_latency_vs_concurrency.png`
+- `p99_latency_vs_concurrency.png`
+
+The measured observations from the existing 30-row dataset are limited to this experiment. Mean epoll throughput is higher at producer counts 1 and 2, while mean TCP throughput is higher at 4, 8, and 16. Mean p50 latency is lower for epoll at all five measured producer counts. Mean p95 latency is lower for TCP at 1 producer and lower for epoll at 2, 4, 8, and 16 producers. Mean p99 latency is lower for TCP at 1 producer and lower for epoll at 2, 4, 8, and 16 producers. These observations do not establish a universal winner, and they do not explain why the measured differences occurred.
+
+The earlier `benchmarks/plot_benchmarks.py` helper remains available for its existing CSV plotting behavior; the Stage 11.3.3 script is the reproducible analysis entry point for the consolidated concurrency experiment.
 
 ## Limitations
 

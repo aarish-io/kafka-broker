@@ -32,6 +32,9 @@ producer
 consumer
 test_record
 test_topic_log
+test_protocol_parse
+test_broker_replicate
+test_stage11_metrics
 
 # Temporary stage test drivers/harnesses
 epoll_stage*_driver
@@ -44,6 +47,13 @@ temp_stage*_test.py
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Generated benchmark results
+benchmark-results/
 
 # Storage and logs (Stage 3+)
 data/
