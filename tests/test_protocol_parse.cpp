@@ -57,12 +57,23 @@ void test_parse_existing_requests_still_work()
     std::cout << "[PASS] test_parse_existing_requests_still_work\n";
 }
 
+void test_parse_metrics()
+{
+    kafka::Request req = kafka::parse_request("METRICS");
+    assert(req.type == kafka::RequestType::METRICS);
+    assert(kafka::parse_request("METRICS extra").type == kafka::RequestType::INVALID);
+    assert(kafka::parse_request("METRICS extra values").type == kafka::RequestType::INVALID);
+
+    std::cout << "[PASS] test_parse_metrics\n";
+}
+
 int main()
 {
     test_parse_valid_replicate();
     test_parse_replicate_allows_partition_above_default_count();
     test_parse_invalid_replicate();
     test_parse_existing_requests_still_work();
+    test_parse_metrics();
 
     std::cout << "All protocol parse tests passed.\n";
     return 0;

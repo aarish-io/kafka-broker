@@ -35,6 +35,14 @@ def ensure_output_dir(path: str):
 def send_message(host: str, port: int, topic: str, partition: int, payload: str):
     request = f"PRODUCE {topic} {partition} {payload}".encode("utf-8")
 
+    response = send_request(host, port, request)
+    if response != "OK":
+        raise RuntimeError(f"Unexpected broker response: {response!r}")
+    return response
+
+
+def send_request(host: str, port: int, request: bytes):
+
     with socket.create_connection((host, port), timeout=5.0) as sock:
         sock.sendall(len(request).to_bytes(4, byteorder="big"))
         sock.sendall(request)
@@ -54,9 +62,15 @@ def send_message(host: str, port: int, topic: str, partition: int, payload: str)
             remaining -= len(chunk)
 
         response = b"".join(chunks).decode("utf-8", "replace").strip()
-        if response != "OK":
-            raise RuntimeError(f"Unexpected broker response: {response!r}")
         return response
+
+
+def fetch_metrics(host: str, port: int):
+    response = send_request(host, port, b"METRICS")
+    values = response.split(",")
+    if len(values) != 13:
+        raise RuntimeError(f"Unexpected metrics response: {response!r}")
+    return values
 
 
 def run_producer(args, producer_index):
@@ -80,6 +94,7 @@ def main():
             if exc is not None:
                 raise RuntimeError(f"producer failed: {exc}") from exc
     elapsed = time.perf_counter() - start_time
+    metrics_values = fetch_metrics(args.broker_host, args.broker_port)
 
     rows = [[
         args.mode,
@@ -90,6 +105,7 @@ def main():
         f"{elapsed:.6f}",
         f"{(total_messages / elapsed) if elapsed > 0 else 0.0:.6f}",
         f"{(total_bytes / elapsed) if elapsed > 0 else 0.0:.6f}",
+        *metrics_values,
     ]]
 
     with open(args.output, "w", newline="") as csvfile:
@@ -103,6 +119,19 @@ def main():
             "total_seconds",
             "msg_per_sec",
             "bytes_per_sec",
+            "total_requests",
+            "successful_requests",
+            "failed_requests",
+            "produce_requests",
+            "fetch_requests",
+            "join_requests",
+            "commit_requests",
+            "total_bytes_processed",
+            "avg_latency_us",
+            "p50_latency_us",
+            "p95_latency_us",
+            "p99_latency_us",
+            "max_latency_us",
         ])
         writer.writerows(rows)
 

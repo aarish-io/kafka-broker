@@ -5,6 +5,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -55,12 +56,52 @@ namespace
 
         std::cout << "[PASS] test_metrics_recording\n";
     }
+
+    void test_metrics_request_snapshot_excludes_itself()
+    {
+        const std::filesystem::path data_dir = "test_data_stage11_metrics_request";
+        std::filesystem::remove_all(data_dir);
+
+        kafka::Broker broker;
+        broker.configure(kafka::BrokerRole::LEADER);
+        broker.recover_from_disk(data_dir.string());
+
+        kafka::Request produce;
+        produce.type = kafka::RequestType::PRODUCE;
+        produce.topic = "metrics-test";
+        produce.partition = 0;
+        produce.payload = "payload";
+        assert(broker.handle_request(produce) == "OK");
+
+        kafka::Request metrics_request;
+        metrics_request.type = kafka::RequestType::METRICS;
+        const std::string response = broker.handle_request(metrics_request);
+
+        std::istringstream fields(response);
+        std::string field;
+        std::vector<std::string> values;
+        while (std::getline(fields, field, ','))
+        {
+            values.push_back(field);
+        }
+
+        assert(values.size() == 13);
+        assert(values[0] == "1");
+        assert(values[1] == "1");
+        assert(values[2] == "0");
+        assert(values[3] == "1");
+        assert(values[7] == "51");
+
+        std::filesystem::remove_all(data_dir);
+        std::cout << "[PASS] test_metrics_request_snapshot_excludes_itself\n";
+    }
 }
 
 int main()
 {
     test_server_mode_parsing();
     test_metrics_recording();
+    test_metrics_request_snapshot_excludes_itself();
     std::cout << "All Stage 11 metric tests passed.\n";
     return 0;
 }

@@ -87,6 +87,16 @@ namespace kafka
             return req;
         }
 
+        if (command == "METRICS")
+        {
+            if (has_extra_tokens(iss))
+            {
+                return req; // INVALID
+            }
+            req.type = RequestType::METRICS;
+            return req;
+        }
+
         if (command == "PRODUCE")
         {
             std::string topic;

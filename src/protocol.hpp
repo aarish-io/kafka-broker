@@ -16,6 +16,7 @@ namespace kafka
         REPLICATE,
         REPLICATION_PROGRESS,
         PING,
+        METRICS,
         INVALID
     };
 
@@ -40,6 +41,7 @@ namespace kafka
     //   COMMIT <group> <consumer_id> <topic> <partition> <offset>
     //   REPLICATE <topic> <partition> <offset> <payload>
     //   PING
+    //   METRICS
     //
     // GROUP_POLL response rows are:
     //   <topic> <partition> <committed_offset>

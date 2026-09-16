@@ -141,6 +141,11 @@ namespace kafka
             success = true;
             break;
 
+        case RequestType::METRICS:
+            response = metrics_.to_csv_row();
+            success = true;
+            break;
+
         case RequestType::REPLICATION_PROGRESS:
         {
             if (role_ != BrokerRole::FOLLOWER)
