@@ -36,7 +36,17 @@ The latency measurement is the time spent inside server-side request handling, f
 
 ## Metrics export
 
-The broker exposes a snapshot object via `Broker::get_metrics_snapshot()`. It can be serialized to CSV using the `Metrics::to_csv_header()` and `Metrics::to_csv_row()` helpers.
+The broker exposes a snapshot object via `Broker::get_metrics_snapshot()`. Metrics can be serialized to CSV using the `Metrics::to_csv_header()` and `Metrics::to_csv_row()` helpers, and the live broker exposes the current row through:
+
+```text
+METRICS
+```
+
+The response has the same 13-column order used by `Metrics::to_csv_header()`:
+
+```text
+total_requests,successful_requests,failed_requests,produce_requests,fetch_requests,join_requests,commit_requests,total_bytes_processed,avg_latency_us,p50_latency_us,p95_latency_us,p99_latency_us,max_latency_us
+```
 
 ## Benchmark workload
 
@@ -128,7 +138,52 @@ The three repetitions are not weighted or recomputed from total durations; each 
 - `p95_latency_vs_concurrency.png`
 - `p99_latency_vs_concurrency.png`
 
-The measured observations from the existing 30-row dataset are limited to this experiment. Mean epoll throughput is higher at producer counts 1 and 2, while mean TCP throughput is higher at 4, 8, and 16. Mean p50 latency is lower for epoll at all five measured producer counts. Mean p95 latency is lower for TCP at 1 producer and lower for epoll at 2, 4, 8, and 16 producers. Mean p99 latency is lower for TCP at 1 producer and lower for epoll at 2, 4, 8, and 16 producers. These observations do not establish a universal winner, and they do not explain why the measured differences occurred.
+## Existing measured results
+
+Source files:
+
+- Raw runs: `benchmark-results/tcp_vs_epoll_concurrency.csv`
+- Aggregated summary: `benchmark-results/tcp_vs_epoll_analysis/tcp_vs_epoll_concurrency_summary.csv`
+
+### Measured facts
+
+The existing dataset contains 30 raw runs:
+
+- modes: `tcp`, `epoll`
+- producer counts: `1`, `2`, `4`, `8`, `16`
+- repetitions: `3`
+- messages per producer: `1000`
+- payload size: `1024` bytes
+- topic: `benchmark`
+- partition: `0`
+
+The aggregate summary currently records:
+
+| Mode | Producers | Mean msg/sec | Stddev msg/sec | Mean p50 us | Mean p95 us | Mean p99 us |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| tcp | 1 | 2103.25 | 166.54 | 104.00 | 150.00 | 203.33 |
+| tcp | 2 | 4258.43 | 139.93 | 108.67 | 209.33 | 291.33 |
+| tcp | 4 | 3319.22 | 906.58 | 184.00 | 530.33 | 754.33 |
+| tcp | 8 | 1523.82 | 192.75 | 126.00 | 307.33 | 472.33 |
+| tcp | 16 | 1667.32 | 49.31 | 119.67 | 271.33 | 408.33 |
+| epoll | 1 | 2523.09 | 327.67 | 99.67 | 160.33 | 260.00 |
+| epoll | 2 | 5449.58 | 498.52 | 74.00 | 125.00 | 206.67 |
+| epoll | 4 | 2739.81 | 470.50 | 95.67 | 198.00 | 298.33 |
+| epoll | 8 | 1425.46 | 341.31 | 116.33 | 207.33 | 311.33 |
+| epoll | 16 | 1329.21 | 129.57 | 110.67 | 220.33 | 321.33 |
+
+### Interpretation
+
+Within this dataset only:
+
+- Mean epoll throughput is higher at producer counts 1 and 2.
+- Mean TCP throughput is higher at producer counts 4, 8, and 16.
+- Mean p50 latency is lower for epoll at all five measured producer counts.
+- Mean p95 latency is lower for TCP at 1 producer and lower for epoll at 2, 4, 8, and 16 producers.
+- Mean p99 latency is lower for TCP at 1 producer and lower for epoll at 2, 4, 8, and 16 producers.
+- Repeatability varies by configuration; for example, TCP at 4 producers has a much larger throughput standard deviation than TCP at 16 producers in this dataset.
+
+These observations do not establish a universal winner, and they do not explain why the measured differences occurred.
 
 The earlier `benchmarks/plot_benchmarks.py` helper remains available for its existing CSV plotting behavior; the Stage 11.3.3 script is the reproducible analysis entry point for the consolidated concurrency experiment.
 

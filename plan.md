@@ -1,6 +1,6 @@
 # Kafka Broker Stage Plan
 
-Last updated: 2026-09-14
+Last updated: 2026-09-17
 
 This file is the short project tracker.
 
@@ -12,7 +12,7 @@ Status legend:
 
 ## Current Position
 
-Current phase: `Stage 10 - Replication` (`DONE`)
+Current phase: `Stage 12 - Polish` (`DONE`)
 
 Working interpretation of the roadmap:
 - `Stage 0` is completed (`DONE`).
@@ -26,6 +26,8 @@ Working interpretation of the roadmap:
 - `Stage 8` is completed (`DONE`).
 - `Stage 9` is completed (`DONE`).
 - `Stage 10` is completed (`DONE`).
+- `Stage 11` is completed (`DONE`).
+- `Stage 12` is completed (`DONE`) for final documentation and GitHub presentation scope.
 
 ## Stages
 
@@ -42,8 +44,54 @@ Working interpretation of the roadmap:
 | 8 | DONE | Explore Linux non-blocking I/O and `epoll`; added `EpollServer` as an alternative event-driven server path while keeping `TcpServer` as the baseline (mini-stages 8.1-8.7). |
 | 9 | DONE | Add crash recovery behavior, persistent record integrity, and delivery semantics documentation. |
 | 10 | DONE | Add simplified leader/follower replication, catch-up, and explicit failover. |
-| 11 | IN PROGRESS | Add observability, metrics, and serious benchmarking. |
-| 12 | LATER | Polish documentation, CI, testing, and resume-ready project material. |
+| 11 | DONE | Add observability, metrics, and serious benchmarking. |
+| 12 | DONE | Polish technical documentation, interview documentation, final README, and GitHub project presentation. |
+
+## Stage 12 Completion Summary
+
+Stage 12 documentation and GitHub presentation scope is COMPLETED.
+
+Completed mini-stages:
+- `12.1` Technical documentation: stage history, architecture, storage/recovery/delivery semantics, and current architecture updates.
+- `12.2` System-design and interview documentation: interview guide, design explanations, failure scenarios, scaling discussion, tradeoffs, and whiteboard cheat sheet.
+- `12.3` Final GitHub README/project presentation: polished README, architecture overview, build/run usage, protocol examples, benchmark graphs, benchmark interpretation, limitations, technology stack, project evolution, and documentation index.
+
+Completed documentation artifacts:
+- `README.md`
+- `docs/stage_history.md`
+- `docs/architecture.md`
+- `docs/storage_recovery_semantics.md`
+- `docs/stage11_observability.md`
+- `docs/interview_guide.md`
+- `current_architecture.md`
+
+Current scope boundary:
+- Stage 12 did not add broker features, modify production C++ behavior, rerun benchmarks, or change benchmark results.
+- Resume material is still outside this completed repository-polish scope.
+
+## Stage 11 Completion Summary
+
+Stage 11 is COMPLETED.
+
+Implemented capabilities:
+- In-memory broker metrics with request counters, success/failure counters, selected request-type counters, bytes processed, and latency samples.
+- `METRICS` protocol request returning CSV-formatted metrics.
+- Configurable startup server mode: default `TcpServer`, optional `--epoll` `EpollServer`.
+- Benchmark driver and controlled TCP-vs-epoll concurrency experiment runner.
+- Benchmark analysis script producing aggregate CSV and graphs.
+- Final benchmark artifacts under `benchmark-results/`, including raw CSV, aggregate summary CSV, and throughput/p50/p95/p99 graphs.
+
+Actual benchmark matrix:
+- Modes: TCP and epoll
+- Producer counts: 1, 2, 4, 8, 16
+- Messages per producer: 1000
+- Payload size: 1024 bytes
+- Repetitions: 3 per configuration
+- Total runs: 30
+
+Interpretation boundary:
+- Results are specific to this local workload and implementation.
+- No universal TCP or epoll performance winner is claimed.
 
 ## Stage 10 Completion Summary
 

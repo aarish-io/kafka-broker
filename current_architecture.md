@@ -32,8 +32,7 @@ kafka-broker/
 ├── build-tsan/           # local sanitizer build output, gitignored
 ├── CMakeLists.txt
 ├── plan.md
-├── planinstruction.md
-└── AGENTS.md
+└── planinstruction.md
 ```
 
 ## High-Level Flow
@@ -86,11 +85,12 @@ consumer
 
 ### `main.cpp`
 
-Thin application entry point. Constructs `Broker`, performs startup
-recovery, constructs `TcpServer`, and starts it. No protocol, socket, or
-storage implementation belongs here. `main.cpp` still starts `TcpServer`;
-`EpollServer` exists as a comparison/testing path that is not started by
-`main.cpp` yet.
+Thin application entry point. Parses server mode, port, data directory,
+role, and optional follower port; constructs `Broker`; performs startup
+recovery; then starts either `TcpServer` or `EpollServer`. No protocol,
+socket, or storage implementation belongs here. `TcpServer` remains the
+default runtime path, and `--epoll` selects the alternative event-driven
+server.
 
 ### `broker.hpp / broker.cpp`
 
@@ -661,8 +661,9 @@ difference is networking only: thread-per-client blocking I/O in
 `TcpServer` versus a single event loop with nonblocking I/O in
 `EpollServer`.
 
-`main.cpp` still starts `TcpServer`. `EpollServer` is a
-comparison/testing path and is not yet the runtime default.
+`main.cpp` starts `TcpServer` by default. Passing `--epoll` starts
+`EpollServer` instead, so the event-driven path is selectable for
+comparison and benchmarking while TCP remains the default.
 
 Recorded Stage 8 validation (WSL Ubuntu, real Linux build):
 - TcpServer regression: sequential PRODUCE OK, multiple sequential clients
@@ -676,15 +677,17 @@ Recorded Stage 8 validation (WSL Ubuntu, real Linux build):
   persistence of the produced message verified.
 
 These tests validate correctness of the event-driven path, not serious
-performance benchmarking. No claim is made that epoll is universally
-faster, no throughput/latency improvement was measured, and no
-production-grade scalability was proven. Quantitative benchmarking of the
-two paths remains Stage 11 work.
+performance benchmarking. Stage 11 later added a controlled TCP-vs-epoll
+benchmark dataset under `benchmark-results/`; those measured results are
+limited to that local experiment and do not prove a universal winner.
 
-## Next Stage
+## Stage 12.1 Documentation Pointers
 
-**Stage 11: Observability and Serious Benchmarking** (`LATER`)
+Stage 12.1 adds deeper documentation under `docs/`:
 
-Stage 10 (Replication) is complete. Future work should build on this
-architecture instead of moving broker logic back into `main.cpp` or client
-programs.
+- `docs/stage_history.md`
+- `docs/architecture.md`
+- `docs/storage_recovery_semantics.md`
+
+Future work should build on this architecture instead of moving broker
+logic back into `main.cpp` or client programs.

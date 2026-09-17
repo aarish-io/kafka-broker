@@ -52,9 +52,6 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Generated benchmark results
-benchmark-results/
-
 # Storage and logs (Stage 3+)
 data/
 logs/
